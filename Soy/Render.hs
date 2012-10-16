@@ -26,6 +26,7 @@ import Data.Maybe
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Builder as TLB
 import qualified Data.Text as T
+import qualified Data.Text.IO as T
 import System.Random
 
 data Function
@@ -89,7 +90,7 @@ setIOSeed = liftIO newStdGen >>= setRandomSeed
 
 addFiles :: (MonadState RenderState m, MonadIO m) => [FilePath] -> m ()
 addFiles fps =
-    do files <- mapM (parseSoyFile . T.pack <=< liftIO . readFile) fps
+    do files <- mapM (parseSoyFile <=< liftIO . T.readFile) fps
        modifyFiles (files++)
     where modifyFiles f = modify $ \s -> s { render_files = f (render_files s) }
 
