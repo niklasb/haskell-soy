@@ -20,6 +20,7 @@ import Test.Framework
 import Control.Applicative
 import Control.Arrow
 import Control.Monad.Error
+import Control.Monad.Reader
 import Control.Monad.State
 import Data.List
 import Data.Maybe
@@ -47,106 +48,119 @@ data LocalVar
     | SimpleVar { var_value :: Value }
     deriving (Eq, Show)
 
-data RenderState
-    = RenderState
-    { render_files :: [File]
-    , render_callStack :: [Call]
-    , render_localStack :: [(Identifier, LocalVar)]
-    , render_globals :: HM.HashMap Identifier Value
-    , render_injected :: HM.HashMap Identifier Value
-    , render_functions :: HM.HashMap Identifier Function
-    , render_random :: StdGen
+data RenderConfig
+    = RenderConfig
+    { cfg_files :: [File]
+    , cfg_globals :: HM.HashMap Identifier Value
+    , cfg_injected :: HM.HashMap Identifier Value
+    , cfg_functions :: HM.HashMap Identifier Function
+    , cfg_initState :: RenderState
     }
 
-type RenderM a = StateT RenderState (Either SoyError) a
+data RenderContext
+    = RenderContext
+    { ctx_currentCall :: Call
+    , ctx_callStack :: [Call]
+    , ctx_localStack :: [(Identifier, LocalVar)]
+    }
 
-emptyRenderState = RenderState [] [] []
-                               HM.empty HM.empty
-                               (HM.fromList builtinFunctions)
-                               (mkStdGen 1337)
+data RenderState
+    = RenderState
+    { state_random :: StdGen
+    }
 
-configure :: (Monad m) => RenderState -> StateT RenderState m () -> m RenderState
+type RenderM a = StateT RenderState (ReaderT (RenderContext, RenderConfig) (Either SoyError)) a
+
+runRenderM cfg ctx x = runReaderT (evalStateT x (cfg_initState cfg)) (ctx, cfg)
+
+asksContext getter = asks (getter . fst)
+asksConfig getter = asks (getter . snd)
+localContext f = local $ first f
+
+defaultRenderState = RenderState (mkStdGen 1337)
+defaultRenderConfig =
+    RenderConfig [] HM.empty HM.empty (HM.fromList builtinFunctions) defaultRenderState
+
+configure :: (Monad m) => RenderConfig -> StateT RenderConfig m () -> m RenderConfig
 configure s inner = execStateT inner s
 
-setup :: (Monad m) => StateT RenderState m () -> m RenderState
-setup = configure emptyRenderState
+setup :: (Monad m) => StateT RenderConfig m () -> m RenderConfig
+setup = configure defaultRenderConfig
+
+modifyState f = modify (\c -> c { cfg_initState = f (cfg_initState c) })
+
+setRandomSeed :: (MonadState RenderConfig m) => StdGen -> m ()
+setRandomSeed gen = modifyState (\s -> s { state_random = gen })
+
+setIOSeed :: (MonadState RenderConfig m, MonadIO m) => m ()
+setIOSeed = liftIO newStdGen >>= setRandomSeed
+
+addFiles :: (MonadState RenderConfig m, MonadIO m) => [FilePath] -> m ()
+addFiles fps =
+    do files <- mapM (parseSoyFile <=< liftIO . T.readFile) fps
+       modifyFiles (files++)
+    where modifyFiles f = modify $ \s -> s { cfg_files = f (cfg_files s) }
+
+addIjData :: (MonadState RenderConfig m) => [(Identifier, Value)] -> m ()
+addIjData vars = modifyIj $ HM.union (HM.fromList vars)
+    where modifyIj f = modify $ \s -> s { cfg_injected = f (cfg_injected s) }
+
+addGlobalData :: (MonadState RenderConfig m) => [(Identifier, Value)] -> m ()
+addGlobalData vars = modifyGlobals $ HM.union (HM.fromList vars)
+    where modifyGlobals f = modify $ \s -> s { cfg_globals = f (cfg_globals s) }
+
+addFunction :: (MonadState RenderConfig m)
+            => Identifier -> ([Value] -> Either SoyError Value)
+            -> m ()
+addFunction name func = modifyFunctions $ HM.insert name (PureFunction func)
+    where modifyFunctions f = modify (\s -> s { cfg_functions = f (cfg_functions s) })
 
 render :: (MonadError SoyError m)
        => [Identifier]
        -> [(Identifier, Value)]
-       -> RenderState
+       -> RenderConfig
        -> m T.Text
-render path vars s = case evalStateT findAndRender s of
-                        Right x -> return x
-                        Left y -> throwError y
-    where findAndRender = findTemplate (PathFull path)
-                              >>= uncurry (renderTemplate $ HM.fromList vars)
+render path vars cfg =
+    do (file, tmpl) <- findTemplateAbs path cfg
+       let ctx = RenderContext (Call file tmpl (HM.fromList vars)) [] []
+       let contents = renderContents (tmpl_content tmpl)
+       either throwError return $ runRenderM cfg ctx contents
 
-setRandomSeed :: (MonadState RenderState m) => StdGen -> m ()
-setRandomSeed gen = modify (\s -> s { render_random = gen })
-
-setIOSeed :: (MonadState RenderState m, MonadIO m) => m ()
-setIOSeed = liftIO newStdGen >>= setRandomSeed
-
-addFiles :: (MonadState RenderState m, MonadIO m) => [FilePath] -> m ()
-addFiles fps =
-    do files <- mapM (parseSoyFile <=< liftIO . T.readFile) fps
-       modifyFiles (files++)
-    where modifyFiles f = modify $ \s -> s { render_files = f (render_files s) }
-
-addIjData :: (MonadState RenderState m) => [(Identifier, Value)] -> m ()
-addIjData vars = modifyIj $ HM.union (HM.fromList vars)
-    where modifyIj f = modify $ \s -> s { render_injected = f (render_injected s) }
-
-addGlobalData :: (MonadState RenderState m) => [(Identifier, Value)] -> m ()
-addGlobalData vars = modifyGlobals $ HM.union (HM.fromList vars)
-    where modifyGlobals f = modify $ \s -> s { render_globals = f (render_globals s) }
-
-addFunction :: (MonadState RenderState m)
-            => Identifier -> ([Value] -> Either SoyError Value)
-            -> m ()
-addFunction name func = modifyFunctions $ HM.insert name (PureFunction func)
-    where modifyFunctions f = modify (\s -> s { render_functions = f (render_functions s) })
+pushCall :: Call -> RenderContext -> RenderContext
+pushCall call ctx = ctx
+    { ctx_currentCall = call
+    , ctx_callStack = (ctx_currentCall ctx : ctx_callStack ctx)
+    }
 
 withTemplate :: File -> Template -> HM.HashMap Identifier Value -> RenderM a -> RenderM a
-withTemplate file tmpl vars inner =
-    do oldCStack <- gets render_callStack
-       oldLStack <- gets render_localStack
-       modify (\r -> r { render_callStack = newCall : oldCStack
-                       , render_localStack = [] })
-       res <- inner
-       modify (\r -> r { render_callStack = oldCStack, render_localStack = oldLStack })
-       return res
-    where newCall = Call file tmpl vars
+withTemplate file tmpl vars = localContext $ pushCall (Call file tmpl vars)
 
 withLocal :: Identifier -> LocalVar -> RenderM a -> RenderM a
-withLocal name var inner =
-    do oldSt <- gets render_localStack
-       setSt $ (name, var) : oldSt
-       res <- inner
-       setSt oldSt
-       return res
-    where setSt st = modify (\r -> r { render_localStack = st })
+withLocal name var = localContext $ pushLocal
+    where pushLocal ctx = ctx { ctx_localStack = (name, var) : ctx_localStack ctx }
 
 filePath = ns_path . file_namespace
 
-findTemplateAbs :: [Identifier] -> RenderM (File, Template)
-findTemplateAbs path =
-    do files <- gets render_files
-       let templates = concatMap templatesWithPathAndFile files
-       case filter (\(p,_,_) -> path == p) templates of
-          [] -> throwError $ LookupError $ T.append "Template not found: " pathStr
-          (_:_:_) -> throwError $ LookupError $ T.append "Template path not unique: " pathStr
-          [(_,f,t)] -> return (f, t)
-    where templatesWithPathAndFile f = map (mapper f) (file_templates f)
+findTemplateAbs :: (MonadError SoyError m)
+                => [Identifier]
+                -> RenderConfig
+                -> m (File, Template)
+findTemplateAbs path cfg =
+    case filter (\(p,_,_) -> path == p) templates of
+        [] -> throwError $ TemplateLookupError $ T.append "Template not found: " pathStr
+        (_:_:_) -> throwError $ TemplateLookupError $ T.append "Template path not unique: " pathStr
+        [(_,f,t)] -> return (f, t)
+    where templates = concatMap templatesWithPathAndFile $ cfg_files cfg
+          templatesWithPathAndFile f = map (mapper f) (file_templates f)
           mapper f t = (filePath f ++ [tmpl_name t], f, t)
           pathStr = T.intercalate "." path
 
 findTemplate :: TemplatePath -> RenderM (File, Template)
-findTemplate (PathFull path) = findTemplateAbs path
+findTemplate (PathFull path) = asksConfig id >>= findTemplateAbs path
 findTemplate (PathRelative path) =
     do curfile <- liftM call_file getCurrentCall
-       findTemplateAbs $ filePath curfile ++ [path]
+       cfg <- asksConfig id
+       findTemplateAbs (filePath curfile ++ [path]) cfg
 
 renderTemplate :: HM.HashMap Identifier Value -> File -> Template -> RenderM T.Text
 renderTemplate vars file template =
@@ -253,11 +267,7 @@ renderForeachCommand (ForeachCommand iter exp body ifempty) =
               withLocal iter (ForeachVar item idx total) $ renderContents body
 
 getCurrentCall :: RenderM Call
-getCurrentCall = gets render_callStack >>= topOrErr
-    where topOrErr st = case st of
-                           [] -> throwError $ GeneralError $
-                                    "Cannot get top of empty call stack"
-                           x:xs -> return x
+getCurrentCall = asksContext ctx_currentCall
 
 renderCallCommand :: CallCommand -> RenderM T.Text
 renderCallCommand (CallCommand target calldata params) =
@@ -303,9 +313,9 @@ findLocal name locals = fmap snd $ find ((name==) . fst) locals
 lookupVar :: Variable -> RenderM (Maybe Value)
 lookupVar var =
     case var of
-       InjectedVar loc -> gets render_injected >>= lookupHM loc
-       GlobalVar loc -> gets render_globals >>= lookupHM loc
-       LocalVar loc -> gets render_localStack >>= lookupLocal loc
+       InjectedVar loc -> asksConfig cfg_injected >>= lookupHM loc
+       GlobalVar loc -> asksConfig cfg_globals >>= lookupHM loc
+       LocalVar loc -> asksContext ctx_localStack >>= lookupLocal loc
     where lookupHM (Location root path) hm = followPath path $ HM.lookup root hm
           lookupLocal loc@(Location root path) locals =
              case findLocal root locals of
@@ -348,7 +358,7 @@ evalExpr exp =
 evalFuncCall :: FuncCall -> RenderM Value
 evalFuncCall (FuncCall name args) =
     do evaluatedArgs <- mapM evalExprDefined args
-       functions <- gets render_functions
+       functions <- asksConfig cfg_functions
        case HM.lookup name functions of
          Just (PureFunction f) -> either throwError return $ f evaluatedArgs
          Just (SpecialFunction f) -> f args
@@ -483,10 +493,10 @@ funcError f = typeError $
 
 debugCtx :: RenderM T.Text
 debugCtx =
-    do cs <- gets render_callStack
-       ls <- gets render_localStack
-       glob <- gets render_globals
-       inj <- gets render_injected
+    do cs <- asksContext ctx_callStack
+       ls <- asksContext ctx_localStack
+       glob <- asksConfig cfg_globals
+       inj <- asksConfig cfg_injected
        return $ T.concat [ showT cs, showT ls, showT glob, showT inj ]
 
 func_debug :: [Expr] -> RenderM Value
@@ -546,14 +556,14 @@ func_randomInt [exp] =
     do upper <- evalExpr exp
        case upper of
           Just (ValInt i) ->
-              do gen <- gets render_random
+              do gen <- gets state_random
                  let (val, gen') = randomR (0, i - 1) gen
                  return $ ValInt val
           _ -> funcError "randomInt(<int>)"
 func_randomInt _ = funcError "randomInt(<int>)"
 
 getForeachVar :: Identifier -> RenderM (Int, Int)
-getForeachVar var = gets render_localStack >>= findVar var
+getForeachVar var = asksContext ctx_localStack >>= findVar var
     where findVar var locals =
             case findLocal var locals of
                 Just (ForeachVar _ index total) -> return $ (index, total)
@@ -614,7 +624,7 @@ testOk a b = assertEqual (Right b) a
 testGen prep inout errin = mapM_ (\(x,y) -> testOk (prep x) y) inout
                         >> mapM_ (\x -> assertLeft (prep x)) errin
 
-testRenderM s func = testGen (flip evalStateT s . func)
+testRenderM cfg ctx f = testGen (\inp -> runRenderM cfg ctx $ f inp)
 
 print_foo = Template "print_foo" [ContentText "foo"] False Nothing
 print_bar = Template "print_bar" [ContentText "bar"] False Nothing
@@ -645,17 +655,22 @@ ns_sub = File (Namespace ["ns","sub"] Nothing)
         [ print_baz
         , print_sub2]
 
-testContext = emptyRenderState
-    { render_files = [ns, ns_sub]
-    , render_callStack = [Call ns print_foo HM.empty]
+testConfig = defaultRenderConfig
+    { cfg_files = [ns, ns_sub]
     }
 
-test_render = testRenderM emptyRenderState
+testContext = RenderContext
+    { ctx_currentCall = Call ns print_foo HM.empty
+    , ctx_callStack = []
+    , ctx_localStack = []
+    }
+
+test_render = testRenderM defaultRenderConfig testContext
         (\t -> renderTemplate HM.empty (File (Namespace ["ns"] (Just NoEscape)) [t]) t)
     [ (Template "foo" [ContentText "Hallo"] False Nothing, "Hallo" ) ]
     []
 
-test_findTemplate = testRenderM testContext findTemplate
+test_findTemplate = testRenderM testConfig testContext findTemplate
     [ (PathFull ["ns", "sub", "print_baz"], (ns_sub, print_baz))
     , (PathFull ["ns", "print_bar"], (ns, print_bar))
     , (PathRelative "print_bar", (ns, print_bar))
@@ -667,25 +682,27 @@ test_findTemplate = testRenderM testContext findTemplate
 
 uncurry3 f (a,b,c) = f a b c
 
-test_renderTemplate = testRenderM (testContext
-        { render_globals = HM.fromList [("foo", ValInt 2)]
-        , render_injected = HM.fromList [("foo", ValInt 3)]
+test_renderTemplate = testRenderM (testConfig
+        { cfg_globals = HM.fromList [("foo", ValInt 2)]
+        , cfg_injected = HM.fromList [("foo", ValInt 3)]
         })
+        testContext
         (uncurry3 renderTemplate)
     [ ((HM.fromList [("foo", ValInt 1)], ns, print_all_foos), "123")
     ]
     []
 
-test_getDefaultEscaping = testRenderM testContext
-                                (\x -> setTmpl x >> getDefaultEscaping)
-    [ (print_sub2, EscapeHtml)
-    , (print_baz, EscapeJs)
-    ]
-    []
-    where setTmpl tmpl = modify $ \r -> r { render_callStack = [Call ns_sub tmpl HM.empty] }
+test_getDefaultEscaping =
+    do assertEqual (Right EscapeHtml) $ defEscapingFor print_sub2
+       assertEqual (Right EscapeJs) $ defEscapingFor print_baz
+    where defEscapingFor tmpl =
+            runRenderM testConfig
+                       testContext { ctx_currentCall = Call ns_sub tmpl HM.empty }
+                       getDefaultEscaping
 
-test_renderPrintCommand = testRenderM (testContext
-        { render_callStack = [Call ns_sub print_sub2 HM.empty] })
+test_renderPrintCommand = testRenderM
+        testConfig
+        testContext { ctx_currentCall = Call ns_sub print_sub2 HM.empty }
         renderPrintCommand
     [ (printStr "&'\"<>" [], "&#x26;&#x27;&#x22;&#x3C;&#x3E;")
     , (printStr "&\"'foo\xff\x1234" [PrintEscape EscapeJs], "&\\x22\\x27foo\\xFF\\u1234")
@@ -700,7 +717,7 @@ test_renderPrintCommand = testRenderM (testContext
     []
     where printStr str dir = PrintCommand (litStr str) dir
 
-test_renderIfCommand = testRenderM testContext renderIfCommand
+test_renderIfCommand = testRenderM testConfig testContext renderIfCommand
     [ (IfCommand [ (litBool False, [ContentText "foo"])
                  , (litBool True, [ContentText "bar"])
                  ]
@@ -731,7 +748,7 @@ test_renderIfCommand = testRenderM testContext renderIfCommand
     ]
     []
 
-test_renderSwitchCommand = testRenderM testContext renderSwitchCommand
+test_renderSwitchCommand = testRenderM testConfig testContext renderSwitchCommand
     [ (SwitchCommand (litInt 2)
                      [ ([litInt 1, litStr "test"], [ContentText "foo"])
                      , ([litInt 3, litInt 2], [ContentText "bar"]) ]
@@ -750,7 +767,7 @@ test_renderSwitchCommand = testRenderM testContext renderSwitchCommand
     ]
     []
 
-test_renderForeachCommand = testRenderM testContext renderForeachCommand
+test_renderForeachCommand = testRenderM testConfig testContext renderForeachCommand
     [ (ForeachCommand "iter"
                       (litList [ litInt 1, litStr "foo", litInt 3 ])
                       [ ContentCommand (printVar LocalVar "iter") ]
@@ -783,7 +800,7 @@ test_renderForeachCommand = testRenderM testContext renderForeachCommand
                                     (FuncCall name args)) []))
           localVar var = ExprVar (LocalVar (Location var []))
 
-test_renderForCommand = testRenderM testContext renderForCommand
+test_renderForCommand = testRenderM testConfig testContext renderForCommand
     [ (ForCommand "iter" (litInt 0) (litInt 6) (litInt 2)
             [ ContentCommand (CommandPrint (PrintCommand
                 (ExprVar (LocalVar (Location "iter" []))) []))
@@ -792,10 +809,11 @@ test_renderForCommand = testRenderM testContext renderForCommand
     ]
     []
 
-test_renderCallCommand = testRenderM (testContext
-        { render_callStack = [Call ns print_foo (HM.fromList
-                                  [("param1", ValInt 1)])]
-        })
+test_renderCallCommand = testRenderM
+        testConfig
+        testContext
+        { ctx_currentCall = Call ns print_foo $ HM.fromList [("param1", ValInt 1)]
+        }
         renderCallCommand
     [ (CallCommand (PathFull ["ns", "print_param1"]) Nothing
                   [("param1", ParamExpr (litStr "'"))],
@@ -821,7 +839,7 @@ test_renderCallCommand = testRenderM (testContext
     [ CallCommand (PathFull ["ns", "print_param1"]) (Just (CallDataExpr (litInt 1))) []
     ]
 
-test_followPath = testRenderM testContext (uncurry followPath)
+test_followPath = testRenderM testConfig testContext (uncurry followPath)
     [ (([litInt 0, litStr "0"],
         Just $ ValList [ValList [ValInt 1]]),
                       Just $ ValInt 1)
@@ -850,14 +868,17 @@ test_followPath = testRenderM testContext (uncurry followPath)
 
     where valMap = ValMap . HM.fromList
 
-test_lookupVar = testRenderM testContext
-        { render_globals = (HM.fromList
+test_lookupVar = testRenderM
+        testConfig
+        { cfg_globals = (HM.fromList
             [ ("global", ValInt 1) ])
-        , render_injected = (HM.fromList
+        , cfg_injected = (HM.fromList
             [ ("ij", ValInt 2) ])
-        , render_callStack = [Call ns print_foo (HM.fromList
-            [ ("foo", ValInt 6) ])]
-        , render_localStack =
+        }
+        testContext
+        { ctx_currentCall = Call ns print_foo (HM.fromList
+                                [ ("foo", ValInt 6) ])
+        , ctx_localStack =
             [ ("foo", SimpleVar (ValInt 3))
             , ("bar", ForeachVar (ValInt 4) 0 1)
             , ("bar", SimpleVar (ValInt 5))
@@ -874,7 +895,7 @@ test_lookupVar = testRenderM testContext
     ]
     []
 
-test_evalLiteral = testRenderM testContext evalLiteral
+test_evalLiteral = testRenderM testConfig testContext evalLiteral
     [ (LiteralList [ litInt 1, litInt 2 ],
             ValList [ ValInt 1, ValInt 2 ])
     , (LiteralMap [(litStr "test", litInt 1), (litStr "abc", litInt 2)],
@@ -882,7 +903,7 @@ test_evalLiteral = testRenderM testContext evalLiteral
     ]
     []
 
-test_evalOp = testRenderM testContext evalOp
+test_evalOp = testRenderM testConfig testContext evalOp
     [ (OpNot (litBool True), Just $ ValBool False)
     , (OpNot (litBool False), Just $ ValBool True)
     , (OpNeg (litInt (-10)), Just $ ValInt 10)
@@ -925,7 +946,7 @@ test_round = testGen func_round
     ]
     []
 
-test_evalFuncCall = testRenderM testContext evalFuncCall
+test_evalFuncCall = testRenderM testConfig testContext evalFuncCall
     [ (FuncCall "length" [ litList [ litInt 1 ]], ValInt 1)
     , (FuncCall "keys" [ litMap [(litStr "test", litInt 1)] ],
             ValList [ ValString "test" ])

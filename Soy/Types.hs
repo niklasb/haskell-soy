@@ -190,6 +190,7 @@ data SoyError
     = LookupError T.Text
     | TypeError T.Text
     | KeyError T.Text
+    | TemplateLookupError T.Text
     | GeneralError T.Text
     | NotImplementedError T.Text
     deriving (Eq, Show)
