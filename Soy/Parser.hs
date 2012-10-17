@@ -397,7 +397,10 @@ nothing = string T.empty
 isVSpace c = isSpace c && not (isHorizontalSpace c)
 skipWhile1 pred = () <$ takeWhile1 pred
 
-lineEnding = string "\n" <|> string "\r" <|> string "\r\n" <|> ("" <$ endOfInput)
+-- parses the line ending as a single linefeed and the
+-- end of the file as the empty string
+lineEnding = "\n" <$ (string "\r\n" <|> string "\n" <|> string "\r")
+         <|> "" <$ endOfInput
 
 braced :: Parser l -> Parser r -> Parser a -> Parser a
 braced l r = between (l *> optSpace_) (optSpace_ *> r)
@@ -460,17 +463,8 @@ test_spaceAndComments_ = testParserNoOut spaceAndComments_
         , "/*/**/*/"
         ]
 
-{-test_contentText = testParser contentText-}
-        {-[ (joinT [ "  http://test /**///foo"-}
-                 {-, " asd"-}
-                 {-, "   asd //test  "-}
-                 {-, "  foo " ], "http://test\nasd\nasd\nfoo")-}
-        {-, ("//test", "")-}
-        {-]-}
-        {-[]-}
-
 test_contentText = testParser contentText
-        [ (joinT [ "  http://test /**///foo"
+        [ (joinT [ "  http://test /**///foo\r"
                  , " asd"
                  , "   asd //test  "
                  , "  foo " ], "  http://test \n asd\n   asd \n  foo ")

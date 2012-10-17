@@ -165,8 +165,29 @@ renderTemplate :: HM.HashMap Identifier J.Value -> File -> Template -> RenderM T
 renderTemplate vars file template =
     do withTemplate file template vars $ renderContents (tmpl_content template)
 
+{-stripContent :: T.Text -> T.Text-}
+{-stripContent txt = T.concat segments-}
+    {-where notNull x = not $ T.null x-}
+          {-lines = filter notNull $ map T.strip $ T.lines txt-}
+          {-sep a b = if T.last a == '>' || T.head b == '<' then "" else " "-}
+          {-segments-}
+            {-| null lines = []-}
+            {-| otherwise = head lines : [ T.append (sep a b) b-}
+                                        {-| (a, b) <- zip lines (tail lines) ]-}
+
+-- implement the line joining heuristics
+stripContent :: T.Text -> T.Text
+stripContent txt = T.concat segments
+    where lines' = mapTailInit T.stripStart T.stripEnd $ T.splitOn "\n" txt
+          lines'' = filter (not . T.null) lines'
+          sep a b = if T.last a == '>' || T.head b == '<' then "" else " "
+          segments
+            | null lines'' = []
+            | otherwise = head lines'' : [ T.append (sep a b) b
+                                          | (a, b) <- zip lines'' (tail lines'') ]
+
 renderContent :: Content -> RenderM T.Text
-renderContent (ContentText t) = return t
+renderContent (ContentText t) = return $ stripContent t
 renderContent (ContentCommand c) = renderCommand c
 
 renderContents conts = T.concat <$> mapM renderContent conts
@@ -570,6 +591,15 @@ findM :: (Monad m) => (a -> m Bool) -> [a] -> m (Maybe a)
 findM f (x:xs) = f x >>= (\b -> if b then return $ Just x else findM f xs)
 findM f [] = return Nothing
 
+-- apply a transformation to the tail of the list and another one to the head of the
+-- list in a single iteration
+mapTailInit :: (a -> a) -> (a -> a) -> [a] -> [a]
+mapTailInit fTail fInit lst =
+    case lst of
+        [] -> []
+        [x] -> [x]
+        x:xs -> fInit x : mapTailInit id fInit (map fTail xs)
+
 returnJSON :: (J.ToJSON a, Monad m) => a -> m J.Value
 returnJSON = return . J.toJSON
 
@@ -638,7 +668,23 @@ testContext = RenderContext
     , ctx_localStack = []
     }
 
-test_render = testRenderM defaultRenderConfig testContext
+test_stripContent =
+    do assertEqual " a>b c \t<d<e " (stripContent " a> \n \n b \n c \t<d \n <e ")
+       assertEqual " a b "          (stripContent " a \n b ")
+       assertEqual " a "            (stripContent " a ")
+       assertEqual "a "             (stripContent "\n a ")
+       assertEqual "  "             (stripContent "  ")
+       assertEqual ""               (stripContent "")
+
+test_renderContents = testRenderM testConfig testContext renderContents
+    [ ([ContentText "\n a ", ContentCommand (CommandText ""), ContentText " b \n"],
+             "a  b")
+    , ([ContentCommand (CommandText ""), ContentText "  ", ContentCommand (CommandText "")],
+             "  ")
+    ]
+    []
+
+test_render = testRenderM testConfig testContext
         (\t -> renderTemplate HM.empty (File (Namespace ["ns"] (Just NoEscape)) [t]) t)
     [ (Template "foo" [ContentText "Hallo"] False Nothing, "Hallo" ) ]
     []
