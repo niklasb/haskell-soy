@@ -1,4 +1,4 @@
-{-# OPTIONS_GHC -fwarn-unused-imports #-}
+{-# OPTIONS_GHC -fwarn-unused-imports -fwarn-incomplete-patterns #-}
 module Soy.JSON where
 
 import qualified Soy.Types as S

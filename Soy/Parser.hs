@@ -1,5 +1,5 @@
 {-# OPTIONS_GHC -F -pgmF htfpp #-}
-{-# OPTIONS_GHC -fwarn-unused-imports #-}
+{-# OPTIONS_GHC -fwarn-unused-imports -fwarn-incomplete-patterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections #-}
 module Soy.Parser where
@@ -35,7 +35,6 @@ file = File <$> (optTopLevel_ *> namespace)
 simpleEscapeMode :: Parser EscapeMode
 simpleEscapeMode = NoEscape <$ string "false"
                <|> EscapeHtml <$ string "true"
-               <|> EscapeContextual <$ string "contextual"
 
 namespace :: Parser Namespace
 namespace = openTag "namespace" header

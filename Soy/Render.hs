@@ -1,5 +1,5 @@
 {-# OPTIONS_GHC -F -pgmF htfpp #-}
-{-# OPTIONS_GHC -fwarn-unused-imports #-}
+{-# OPTIONS_GHC -fwarn-unused-imports -fwarn-incomplete-patterns #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
@@ -199,7 +199,6 @@ escape str mode =
         EscapeUri -> escapeUri str
         EscapeHtml -> escapeHtml str
         EscapeJs -> escapeJs str
-        EscapeContextual -> error "contextual autoescaping not implemented"
 
 insertWordBreaks :: Int -> T.Text -> T.Text
 insertWordBreaks thresh str = T.unwords $ map processWord $ T.words str

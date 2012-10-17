@@ -1,4 +1,4 @@
-{-# OPTIONS_GHC -fwarn-unused-imports #-}
+{-# OPTIONS_GHC -fwarn-unused-imports -fwarn-incomplete-patterns #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -14,7 +14,6 @@ data EscapeMode
     | EscapeHtml
     | EscapeUri
     | EscapeJs
-    | EscapeContextual
     deriving (Eq, Ord, Read, Show)
 
 data Namespace
