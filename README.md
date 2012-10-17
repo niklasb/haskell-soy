@@ -5,7 +5,7 @@ platform. It provides a parser and a renderer and doesn't depend on the Google
 libraries.
 
 The initial code was written during an internship at [factis research][1]. They
-also generally offered to continue sponsoring this project, as they like to
+also generously offered to continue sponsoring this project, as they like to
 give back to the open source community. Thanks a lot!
 
 ## Unimplemented features
