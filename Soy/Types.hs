@@ -4,7 +4,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 module Soy.Types where
 
-import Data.HashMap.Strict as HM
+import qualified Data.Attoparsec.Number as J
 
 import qualified Data.Text as T
 import Control.Monad.Error
@@ -14,19 +14,19 @@ data EscapeMode
     | EscapeHtml
     | EscapeUri
     | EscapeJs
-    deriving (Eq, Ord, Read, Show)
+    deriving (Eq, Ord, Show)
 
 data Namespace
     = Namespace
     { ns_path :: [Identifier]
     , ns_escapeMode :: Maybe EscapeMode
-    } deriving (Eq, Ord, Read, Show)
+    } deriving (Eq, Ord, Show)
 
 data File
     = File
     { file_namespace :: Namespace
     , file_templates :: [Template]
-    } deriving (Eq, Ord, Read, Show)
+    } deriving (Eq, Ord, Show)
 
 data Template
     = Template
@@ -34,19 +34,19 @@ data Template
     , tmpl_content :: [Content]
     , tmpl_private :: Bool
     , tmpl_escapeMode :: Maybe EscapeMode
-    } deriving (Eq, Ord, Read, Show)
+    } deriving (Eq, Ord, Show)
 
 data Content
     = ContentText T.Text
     | ContentCommand Command
-    deriving (Eq, Ord, Read, Show)
+    deriving (Eq, Ord, Show)
 
 type Identifier = T.Text
 
 data TemplatePath
     = PathRelative Identifier
     | PathFull [Identifier]
-    deriving (Eq, Ord, Read, Show)
+    deriving (Eq, Ord, Show)
 
 data Command
     = CommandText T.Text
@@ -56,7 +56,7 @@ data Command
     | CommandForeach ForeachCommand
     | CommandFor ForCommand
     | CommandCall CallCommand
-    deriving (Eq, Ord, Read, Show)
+    deriving (Eq, Ord, Show)
 
 data PrintDirective
     = PrintEscape EscapeMode
@@ -64,31 +64,31 @@ data PrintDirective
     | PrintChangeNewlineToBr
     | PrintInsertWordBreaks Int
     | PrintTruncate Int Bool
-    deriving (Eq, Ord, Read, Show)
+    deriving (Eq, Ord, Show)
 
 data PrintCommand
     = PrintCommand
     { print_expr :: Expr
     , print_directives :: [PrintDirective]
     }
-    deriving (Eq, Ord, Read, Show)
+    deriving (Eq, Ord, Show)
 
 data CallParam
     = ParamExpr Expr
     | ParamTemplate [Content]
-    deriving (Eq, Ord, Read, Show)
+    deriving (Eq, Ord, Show)
 
 data CallData
     = CallDataExpr Expr
     | CallDataAll
-    deriving (Eq, Ord, Read, Show)
+    deriving (Eq, Ord, Show)
 
 data CallCommand
     = CallCommand
     { ccall_target :: TemplatePath
     , ccall_data :: Maybe CallData
     , ccall_params :: [(Identifier, CallParam)]
-    } deriving (Eq, Ord, Read, Show)
+    } deriving (Eq, Ord, Show)
 
 data ForCommand
     = ForCommand
@@ -97,7 +97,7 @@ data ForCommand
     , cfor_to :: Expr
     , cfor_step :: Expr
     , cfor_body :: [Content]
-    } deriving (Eq, Ord, Read, Show)
+    } deriving (Eq, Ord, Show)
 
 data ForeachCommand
     = ForeachCommand
@@ -105,66 +105,55 @@ data ForeachCommand
     , cforeach_collection :: Expr
     , cforeach_body :: [Content]
     , cforeach_ifempty :: Maybe [Content]
-    } deriving (Eq, Ord, Read, Show)
+    } deriving (Eq, Ord, Show)
 
 data IfCommand
     = IfCommand
     { cif_cases :: [(Expr, [Content])]
     , cif_otherwise :: Maybe [Content]
-    } deriving (Eq, Ord, Read, Show)
+    } deriving (Eq, Ord, Show)
 
 data SwitchCommand
     = SwitchCommand
     { switch_expr :: Expr
     , switch_cases :: [([Expr], [Content])]
     , switch_default :: Maybe [Content]
-    } deriving (Eq, Ord, Read, Show)
+    } deriving (Eq, Ord, Show)
 
 data Location
     = Location
     { loc_identifier :: Identifier
     , loc_path :: [Expr]
-    } deriving (Eq, Ord, Read, Show)
+    } deriving (Eq, Ord, Show)
 
 data Variable
     = GlobalVar  { var_loc :: Location }
     | LocalVar { var_loc :: Location }
     | InjectedVar { var_loc :: Location }
-    deriving (Eq, Ord, Read, Show)
+    deriving (Eq, Ord, Show)
 
 data FuncCall
     = FuncCall
     { func_name :: Identifier
     , func_args :: [Expr]
     }
-    deriving (Eq, Ord, Read, Show)
-
-data Value
-    = ValNull
-    | ValBool Bool
-    | ValString T.Text
-    | ValInt Integer
-    | ValFloat Double
-    | ValList [Value]
-    | ValMap (HM.HashMap T.Text Value)
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 data Expr
     = ExprOp OpExpr
     | ExprLiteral Literal
     | ExprVar Variable
     | ExprFuncCall FuncCall
-    deriving (Eq, Ord, Read, Show)
+    deriving (Eq, Ord, Show)
 
 data Literal
     = LiteralNull
     | LiteralString T.Text
-    | LiteralInt Integer
-    | LiteralFloat Double
+    | LiteralNumber J.Number
     | LiteralBool Bool
     | LiteralList [Expr]
     | LiteralMap [(Expr, Expr)]
-    deriving (Eq, Ord, Read, Show)
+    deriving (Eq, Ord, Show)
 
 data OpExpr
     = OpNot Expr
@@ -183,7 +172,7 @@ data OpExpr
     | OpAnd Expr Expr
     | OpOr Expr Expr
     | OpConditional Expr Expr Expr
-    deriving (Eq, Ord, Read, Show)
+    deriving (Eq, Ord, Show)
 
 data SoyError
     = LookupError T.Text

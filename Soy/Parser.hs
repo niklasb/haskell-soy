@@ -157,9 +157,9 @@ forCommand =
                       switchFunc func iter
           switchFunc f iter = case f of
              FuncCall "range" [ to ]
-               -> return (iter, litInt 0, to, litInt 1)
+               -> return (iter, exprInt 0, to, exprInt 1)
              FuncCall "range" [ from, to ]
-               -> return (iter, from, to, litInt 1)
+               -> return (iter, from, to, exprInt 1)
              FuncCall "range" [ from, to, step ]
                -> return (iter, from, to, step)
              _ -> fail "invalid `for` command"
@@ -295,11 +295,9 @@ bool = True <$ string "true"
    <|> False <$ string "false"
 
 numLiteral :: Parser Literal
-numLiteral = (LiteralInt <$> signed hexNumber)
-         <|> (convertNumber <$> number)
-    where convertNumber (I i) = LiteralInt i
-          convertNumber (D d) = LiteralFloat d
-          hexNumber = "0x" .*> (decodeHexUnsafe <$> many hexDigitUpper)
+numLiteral = LiteralNumber <$> (signed hexNumber)
+         <|> LiteralNumber <$> number
+    where hexNumber = I <$> ("0x" .*> (decodeHexUnsafe <$> many hexDigitUpper))
 
 jsListLike = listLike (char '[') (char ']') (char ',')
 
@@ -315,7 +313,7 @@ variable = InjectedVar <$> ("$ij." .*> location)
 locSegment :: Parser Expr
 locSegment = char '.' *> optSpace_ *> offsetOrId
          <|> bracedC '[' ']' expr
-    where offsetOrId = (litInt <$> decimal) <|> (litStr <$> identifier)
+    where offsetOrId = (exprInt <$> decimal) <|> (exprStr <$> identifier)
 
 location :: Parser Location
 location = Location <$> identifier <*> many (optSpace_ *> locSegment)
@@ -386,8 +384,6 @@ multiLineComment_ = () <$ string "/*" <* manyTill anyChar (string "*/")
 
 -- helpers
 
-litInt = ExprLiteral . LiteralInt
-
 delegate :: (Monad m) => Parser a -> T.Text -> m a
 delegate p txt =
     case parseOnly (p <* endOfInput) txt of
@@ -425,6 +421,12 @@ a `sepBySpaceTrailing` sep = a `sepBySpace` sep <* optional (optSpace_ *> sep)
 
 decodeHexUnsafe :: String -> Integer
 decodeHexUnsafe hex = fromMaybe 0 (headMay $ map fst $ readHex hex)
+
+exprInt = ExprLiteral . litInt
+exprStr = ExprLiteral . LiteralString
+
+litInt = LiteralNumber . I
+litFloat = LiteralNumber . D
 
 -- =====================================================================
 --- TESTING
@@ -572,17 +574,15 @@ test_identifier = testParserNoOut identifier
         , "ac-de"
         ]
 
-litStr = ExprLiteral . LiteralString
-
 test_variable = testParser variable
         [ ("$ij.test[0]['test']", InjectedVar (Location "test"
-                [litInt 0, litStr "test"]))
+                [exprInt 0, exprStr "test"]))
         , ("test.ABC", GlobalVar (Location "test"
-                [litStr "ABC"]))
+                [exprStr "ABC"]))
         , ("$local.var['test']", LocalVar (Location "local"
-                [litStr "var", litStr "test"]))
+                [exprStr "var", exprStr "test"]))
         , ("$local . 0 [1+2] [0x0]", LocalVar (Location "local"
-                [litInt 0, ExprOp (OpPlus (litInt 1) (litInt 2)), litInt 0]))
+                [exprInt 0, ExprOp (OpPlus (exprInt 1) (exprInt 2)), exprInt 0]))
         ]
 
         [ "$test."
@@ -593,23 +593,23 @@ test_variable = testParser variable
 
 test_literalMap = testParser literalMap
         [ ("[:]", [])
-        , ("['abc':1, (3+4):2]", [ (litStr "abc", litInt 1)
-                                 , (ExprOp (OpPlus (litInt 3) (litInt 4)), litInt 2)
+        , ("['abc':1, (3+4):2]", [ (exprStr "abc", exprInt 1)
+                                 , (ExprOp (OpPlus (exprInt 3) (exprInt 4)), exprInt 2)
                                  ])
-        , ("[ '1 foo' : 1 ]", [ (litStr "1 foo", litInt 1) ])
+        , ("[ '1 foo' : 1 ]", [ (exprStr "1 foo", exprInt 1) ])
         ]
         []
 
 test_numLiteral = testParser numLiteral
-        [ ("3.3", LiteralFloat 3.3)
-        , ("42", LiteralInt 42)
-        , ("0", LiteralInt 0)
-        , ("-0", LiteralInt 0)
-        , ("-0.111", LiteralFloat (-0.111))
-        , ("-10", LiteralInt (-10))
-        , ("0xFF", LiteralInt 255)
-        , ("-0xFF", LiteralInt (-255))
-        , ("123123123123123123123", LiteralInt 123123123123123123123)
+        [ ("3.3", litFloat 3.3)
+        , ("42", litInt 42)
+        , ("0", litInt 0)
+        , ("-0", litInt 0)
+        , ("-0.111", litFloat (-0.111))
+        , ("-10", litInt (-10))
+        , ("0xFF", litInt 255)
+        , ("-0xFF", litInt (-255))
+        , ("123123123123123123123", litInt 123123123123123123123)
         ]
 
         [ "0b123"
@@ -627,17 +627,17 @@ test_constant = testParser constant
 
 test_funcCall = testParser funcCall
         [ ("test ( 1 , 2,3, )",
-                FuncCall "test" [ litInt 1, litInt 2, litInt 3 ])
+                FuncCall "test" [ exprInt 1, exprInt 2, exprInt 3 ])
         ]
         []
 
 test_expr = testParser expr
         [ ("['A':3, 'B':[ 1,2,' test'], 'C':[ true, false, null]]",
                 ExprLiteral (LiteralMap
-                    [ (litStr "A", litInt 3)
-                    , (litStr "B", ExprLiteral (LiteralList
-                                    [ litInt 1 , litInt 2 , litStr " test" ]))
-                    , (litStr "C", ExprLiteral (LiteralList
+                    [ (exprStr "A", exprInt 3)
+                    , (exprStr "B", ExprLiteral (LiteralList
+                                    [ exprInt 1 , exprInt 2 , exprStr " test" ]))
+                    , (exprStr "C", ExprLiteral (LiteralList
                                     [ ExprLiteral (LiteralBool True)
                                     , ExprLiteral (LiteralBool False)
                                     , ExprLiteral LiteralNull ]))
@@ -645,34 +645,34 @@ test_expr = testParser expr
         , ("[]", ExprLiteral (LiteralList []))
         , ("[:]", ExprLiteral (LiteralMap []))
         , ("1 + 2 == test(1)",
-                ExprOp (OpEqual (ExprOp (OpPlus (litInt 1) (litInt 2)))
-                                (ExprFuncCall (FuncCall "test" [litInt 1]))))
+                ExprOp (OpEqual (ExprOp (OpPlus (exprInt 1) (exprInt 2)))
+                                (ExprFuncCall (FuncCall "test" [exprInt 1]))))
         , ("1*2 + 3/4%5",
-                ExprOp (OpPlus (ExprOp (OpMul (litInt 1) (litInt 2)))
-                               (ExprOp (OpMod (ExprOp (OpDiv (litInt 3)
-                                                             (litInt 4)))
-                                              (litInt 5)))))
+                ExprOp (OpPlus (ExprOp (OpMul (exprInt 1) (exprInt 2)))
+                               (ExprOp (OpMod (ExprOp (OpDiv (exprInt 3)
+                                                             (exprInt 4)))
+                                              (exprInt 5)))))
         , ("1 and 2 and 3",
-                ExprOp (OpAnd (litInt 1) (ExprOp (OpAnd (litInt 2) (litInt 3)))))
+                ExprOp (OpAnd (exprInt 1) (ExprOp (OpAnd (exprInt 2) (exprInt 3)))))
         , ("1 and 2 ? 3 or 5 : 7 == 8", ExprOp (OpConditional
-                (ExprOp (OpAnd (litInt 1) (litInt 2)))
-                (ExprOp (OpOr (litInt 3) (litInt 5)))
-                (ExprOp (OpEqual (litInt 7) (litInt 8)))))
+                (ExprOp (OpAnd (exprInt 1) (exprInt 2)))
+                (ExprOp (OpOr (exprInt 3) (exprInt 5)))
+                (ExprOp (OpEqual (exprInt 7) (exprInt 8)))))
         , ("1 ? 2?3:4 : 5", ExprOp (OpConditional
-                (litInt 1)
-                (ExprOp (OpConditional (litInt 2) (litInt 3) (litInt 4)))
-                (litInt 5)))
+                (exprInt 1)
+                (ExprOp (OpConditional (exprInt 2) (exprInt 3) (exprInt 4)))
+                (exprInt 5)))
         , ("1 ? 2 : 3?4:5", ExprOp (OpConditional
-                (litInt 1)
-                (litInt 2)
-                (ExprOp (OpConditional (litInt 3) (litInt 4) (litInt 5)))))
+                (exprInt 1)
+                (exprInt 2)
+                (ExprOp (OpConditional (exprInt 3) (exprInt 4) (exprInt 5)))))
         , ("(1+2)*3 + $data[0] == 3", ExprOp (OpEqual
                 (ExprOp (OpPlus
                     (ExprOp (OpMul
-                        (ExprOp (OpPlus (litInt 1) (litInt 2)))
-                        (litInt 3)))
-                    (ExprVar (LocalVar (Location "data" [litInt 0])))))
-                (litInt 3)))
+                        (ExprOp (OpPlus (exprInt 1) (exprInt 2)))
+                        (exprInt 3)))
+                    (ExprVar (LocalVar (Location "data" [exprInt 0])))))
+                (exprInt 3)))
         ]
         []
 
@@ -699,7 +699,7 @@ test_foreachCommand = testParser foreachCommand
                 ForeachCommand "test"
                                (ExprOp (OpPlus
                                    (ExprVar (LocalVar (Location "data" [])))
-                                   (litInt 5)))
+                                   (exprInt 5)))
                                [ContentText "\ntest\n"]
                                (Just [ContentText "\ntest2\n"]))
         , (joinT [ "{foreach $test in $data + 5}"
@@ -708,7 +708,7 @@ test_foreachCommand = testParser foreachCommand
                 ForeachCommand "test"
                                (ExprOp (OpPlus
                                    (ExprVar (LocalVar (Location "data" [])))
-                                   (litInt 5)))
+                                   (exprInt 5)))
                                [ContentText "\ntest\n"]
                                Nothing)
         ]
@@ -718,15 +718,15 @@ test_forCommand = testParser forCommand
         [ (joinT [ "{for $test in range(10)}"
                  , "test"
                  , "{/for}" ],
-                ForCommand "test" (litInt 0) (litInt 10) (litInt 1) [ContentText "\ntest\n"])
+                ForCommand "test" (exprInt 0) (exprInt 10) (exprInt 1) [ContentText "\ntest\n"])
         , (joinT [ "{for $test in range(2, 10)}"
                  , "test"
                  , "{/for}" ],
-                ForCommand "test" (litInt 2) (litInt 10) (litInt 1) [ContentText "\ntest\n"])
+                ForCommand "test" (exprInt 2) (exprInt 10) (exprInt 1) [ContentText "\ntest\n"])
         , (joinT [ "{for $test in range(2, 10, 3)}"
                  , "test"
                  , "{/for}" ],
-                ForCommand "test" (litInt 2) (litInt 10) (litInt 3) [ContentText "\ntest\n"])
+                ForCommand "test" (exprInt 2) (exprInt 10) (exprInt 3) [ContentText "\ntest\n"])
         ]
         []
 
@@ -740,18 +740,18 @@ test_ifCommand = testParser ifCommand
                  , "{else}"
                  , "test4"
                  , "{/if}" ],
-                IfCommand [ (ExprOp (OpEqual (litInt 1) (litInt 2)),
+                IfCommand [ (ExprOp (OpEqual (exprInt 1) (exprInt 2)),
                                 [ContentText "\ntest\n"])
-                          , (ExprOp (OpEqual (litInt 3) (litInt 3)),
+                          , (ExprOp (OpEqual (exprInt 3) (exprInt 3)),
                                 [ContentText "\ntest2\n"])
-                          , (ExprOp (OpEqual (litInt 4) (litInt 4)),
+                          , (ExprOp (OpEqual (exprInt 4) (exprInt 4)),
                                 [ContentText "\ntest3\n"])
                           ]
                           (Just [ ContentText "\ntest4\n" ]))
         , (joinT [ "{if 1 == 2}"
                  , "test"
                  , "{/if}" ],
-                IfCommand [ (ExprOp (OpEqual (litInt 1) (litInt 2)),
+                IfCommand [ (ExprOp (OpEqual (exprInt 1) (exprInt 2)),
                                 [ContentText "\ntest\n"])
                           ]
                           Nothing)
@@ -767,16 +767,16 @@ test_switchCommand = testParser switchCommand
                  , "{default}"
                  , "test3"
                  , "{/switch}" ],
-                SwitchCommand (litInt 1)
-                              [ ([litInt 1, litInt 2],
+                SwitchCommand (exprInt 1)
+                              [ ([exprInt 1, exprInt 2],
                                      [ContentText "\ntest1\n"])
-                              , ([litInt 3],
+                              , ([exprInt 3],
                                      [ContentText "\ntest2\n"])
                               ]
                               (Just [ContentText "\ntest3\n"]))
         , (joinT [ "{switch 1}"
                  , "{/switch}" ],
-                SwitchCommand (litInt 1) [] Nothing)
+                SwitchCommand (exprInt 1) [] Nothing)
         ]
         []
 
@@ -792,7 +792,7 @@ test_callCommand = testParser callCommand
                             [])
         , ("{call .test data=\"1\"/}",
                 CallCommand (PathRelative "test")
-                            (Just (CallDataExpr (litInt 1)))
+                            (Just (CallDataExpr (exprInt 1)))
                             [])
         , (joinT [ "{call .test}"
                  , "  {param foo: 1 /}"
@@ -802,7 +802,7 @@ test_callCommand = testParser callCommand
                  , "{/call}" ],
                 CallCommand (PathRelative "test")
                             Nothing
-                            [ ("foo", ParamExpr (litInt 1))
+                            [ ("foo", ParamExpr (exprInt 1))
                             , ("bar", ParamTemplate [
                                             ContentText "\n    test\n  " ])
                             ])
@@ -811,11 +811,11 @@ test_callCommand = testParser callCommand
         ]
 
 test_printCommand = testParser (printCommand ["nil"])
-        [ ("{print 1 }", PrintCommand (litInt 1) [])
-        , ("{ 2 }", PrintCommand (litInt 2) [])
+        [ ("{print 1 }", PrintCommand (exprInt 1) [])
+        , ("{ 2 }", PrintCommand (exprInt 2) [])
         , ("{else}", PrintCommand (ExprVar (GlobalVar (Location "else" []))) [])
         , ("{print 1|noAutoescape |id|escapeHtml|escapeUri|escapeJs }",
-              PrintCommand (litInt 1)
+              PrintCommand (exprInt 1)
                 [ PrintEscape NoEscape
                 , PrintId
                 , PrintEscape EscapeHtml
@@ -823,11 +823,11 @@ test_printCommand = testParser (printCommand ["nil"])
                 , PrintEscape EscapeJs
                 ])
         , ("{print 1|changeNewlineToBr}",
-              PrintCommand (litInt 1) [PrintChangeNewlineToBr])
+              PrintCommand (exprInt 1) [PrintChangeNewlineToBr])
         , ("{print 1|insertWordBreaks: 10}",
-              PrintCommand (litInt 1) [PrintInsertWordBreaks 10])
+              PrintCommand (exprInt 1) [PrintInsertWordBreaks 10])
         , ("{print 1|truncate:10 |truncate: 10 , false }",
-              PrintCommand (litInt 1)
+              PrintCommand (exprInt 1)
                   [ PrintTruncate 10 True
                   , PrintTruncate 10 False
                   ])
@@ -856,11 +856,11 @@ test_nestedCommand = testParser (command [])
                  , "  test3"
                  , "{/if}" ],
                 CommandIf (IfCommand [
-                    (ExprOp (OpEqual (litInt 1) (litInt 2)),
+                    (ExprOp (OpEqual (exprInt 1) (exprInt 2)),
                         [ ContentText "\n  "
                         , ContentCommand (CommandForeach (ForeachCommand
                               "test"
-                              (litInt 3)
+                              (exprInt 3)
                               [ContentText "\n    test1\n  "]
                               (Just [ContentText "\n    test2\n  "])))
                         , ContentText "\n"
@@ -875,10 +875,10 @@ test_nestedCommand = testParser (command [])
                  , "  test2"
                  , "{/if}" ],
                 CommandIf (IfCommand [
-                    (ExprOp (OpEqual (litInt 1) (litInt 2)),
+                    (ExprOp (OpEqual (exprInt 1) (exprInt 2)),
                         [ ContentText "\n  "
                         , ContentCommand (CommandIf (IfCommand
-                             [ (ExprOp (OpEqual (litInt 3) (litInt 4)),
+                             [ (ExprOp (OpEqual (exprInt 3) (exprInt 4)),
                                     [ ContentText "\n    test1\n  " ])
                              ]
                              Nothing))

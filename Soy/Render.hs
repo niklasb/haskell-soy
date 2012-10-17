@@ -6,13 +6,12 @@
 {-# LANGUAGE TupleSections #-}
 module Soy.Render where
 
-import Soy.JSON()
 import Soy.Parser (parseSoyFile)
 import Soy.Sanitization
 import Soy.Types
 
-import qualified Data.Aeson.Encode as J
 import qualified Data.Aeson as J
+import qualified Data.Attoparsec.Number as J
 import qualified Data.HashMap.Strict as HM
 import Safe
 import Test.Framework
@@ -24,35 +23,35 @@ import Control.Monad.Reader
 import Control.Monad.State
 import Data.List
 import Data.Maybe
-import qualified Data.Text.Lazy as TL
-import qualified Data.Text.Lazy.Builder as TLB
+import qualified Data.Vector as V
+import Data.Vector ((!?))
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import System.Random
 
 data Function
-    = PureFunction ([Value] -> Either SoyError Value)
-    | SpecialFunction ([Expr] -> RenderM Value)
+    = PureFunction ([J.Value] -> Either SoyError J.Value)
+    | SpecialFunction ([Expr] -> RenderM J.Value)
 
 data Call
     = Call
     { call_file :: File
     , call_template :: Template
-    , call_variables :: HM.HashMap Identifier Value
+    , call_variables :: HM.HashMap Identifier J.Value
     } deriving (Eq, Show)
 
 data LocalVar
-    = ForeachVar { var_value :: Value
+    = ForeachVar { var_value :: J.Value
                  , foreach_index :: Int
                  , foreach_total :: Int }
-    | SimpleVar { var_value :: Value }
+    | SimpleVar { var_value :: J.Value }
     deriving (Eq, Show)
 
 data RenderConfig
     = RenderConfig
     { cfg_files :: [File]
-    , cfg_globals :: HM.HashMap Identifier Value
-    , cfg_injected :: HM.HashMap Identifier Value
+    , cfg_globals :: HM.HashMap Identifier J.Value
+    , cfg_injected :: HM.HashMap Identifier J.Value
     , cfg_functions :: HM.HashMap Identifier Function
     , cfg_initState :: RenderState
     }
@@ -101,23 +100,23 @@ addFiles fps =
        modifyFiles (files++)
     where modifyFiles f = modify $ \s -> s { cfg_files = f (cfg_files s) }
 
-addIjData :: (MonadState RenderConfig m) => [(Identifier, Value)] -> m ()
+addIjData :: (MonadState RenderConfig m) => [(Identifier, J.Value)] -> m ()
 addIjData vars = modifyIj $ HM.union (HM.fromList vars)
     where modifyIj f = modify $ \s -> s { cfg_injected = f (cfg_injected s) }
 
-addGlobalData :: (MonadState RenderConfig m) => [(Identifier, Value)] -> m ()
+addGlobalData :: (MonadState RenderConfig m) => [(Identifier, J.Value)] -> m ()
 addGlobalData vars = modifyGlobals $ HM.union (HM.fromList vars)
     where modifyGlobals f = modify $ \s -> s { cfg_globals = f (cfg_globals s) }
 
 addFunction :: (MonadState RenderConfig m)
-            => Identifier -> ([Value] -> Either SoyError Value)
+            => Identifier -> ([J.Value] -> Either SoyError J.Value)
             -> m ()
 addFunction name func = modifyFunctions $ HM.insert name (PureFunction func)
     where modifyFunctions f = modify (\s -> s { cfg_functions = f (cfg_functions s) })
 
 render :: (MonadError SoyError m)
        => [Identifier]
-       -> [(Identifier, Value)]
+       -> [(Identifier, J.Value)]
        -> RenderConfig
        -> m T.Text
 render path vars cfg =
@@ -132,7 +131,7 @@ pushCall call ctx = ctx
     , ctx_callStack = (ctx_currentCall ctx : ctx_callStack ctx)
     }
 
-withTemplate :: File -> Template -> HM.HashMap Identifier Value -> RenderM a -> RenderM a
+withTemplate :: File -> Template -> HM.HashMap Identifier J.Value -> RenderM a -> RenderM a
 withTemplate file tmpl vars = localContext $ pushCall (Call file tmpl vars)
 
 withLocal :: Identifier -> LocalVar -> RenderM a -> RenderM a
@@ -158,11 +157,11 @@ findTemplateAbs path cfg =
 findTemplate :: TemplatePath -> RenderM (File, Template)
 findTemplate (PathFull path) = asksConfig id >>= findTemplateAbs path
 findTemplate (PathRelative path) =
-    do curfile <- liftM call_file getCurrentCall
+    do curfile <- call_file <$> getCurrentCall
        cfg <- asksConfig id
        findTemplateAbs (filePath curfile ++ [path]) cfg
 
-renderTemplate :: HM.HashMap Identifier Value -> File -> Template -> RenderM T.Text
+renderTemplate :: HM.HashMap Identifier J.Value -> File -> Template -> RenderM T.Text
 renderTemplate vars file template =
     do withTemplate file template vars $ renderContents (tmpl_content template)
 
@@ -170,7 +169,7 @@ renderContent :: Content -> RenderM T.Text
 renderContent (ContentText t) = return t
 renderContent (ContentCommand c) = renderCommand c
 
-renderContents conts = liftM T.concat $ mapM renderContent conts
+renderContents conts = T.concat <$> mapM renderContent conts
 
 renderCommand :: Command -> RenderM T.Text
 renderCommand cmd =
@@ -225,7 +224,7 @@ renderPrintCommand (PrintCommand exp directives) =
        let str' = foldl applyDirective str directives
        if any stopDefaultEscape directives
             then return str'
-            else liftM (escape str') getDefaultEscaping
+            else escape str' <$> getDefaultEscaping
     where stopDefaultEscape (PrintEscape _) = True
           stopDefaultEscape PrintId = True
           stopDefaultEscape _ = False
@@ -242,22 +241,22 @@ renderIfCommand (IfCommand cases otherwise) =
 renderSwitchCommand :: SwitchCommand -> RenderM T.Text
 renderSwitchCommand (SwitchCommand exp cases otherwise) =
         evalCases otherwise $ map (first condition) cases
-    where condition exps = liftM2 elem (evalExpr exp) (mapM evalExpr exps)
+    where condition exps = elem <$> evalExpr exp <*> mapM evalExpr exps
 
 renderForCommand :: ForCommand -> RenderM T.Text
 renderForCommand (ForCommand iter fromExp toExp stepExp body) =
     do from <- evalInt fromExp
        to <- evalInt toExp
        step <- evalInt stepExp
-       T.concat <$> mapM (iteration . ValInt) [from, from + step .. to - 1]
+       T.concat <$> mapM (iteration . J.Number . J.I) [from, from + step .. to - 1]
     where iteration item = withLocal iter (SimpleVar item) $ renderContents body
 
 renderForeachCommand :: ForeachCommand -> RenderM T.Text
 renderForeachCommand (ForeachCommand iter exp body ifempty) =
     do coll <- evalExprDefined exp
        case coll of
-          ValList [] -> renderIfEmpty
-          ValList lst -> renderNonEmpty lst
+          J.Array ary -> if V.null ary then renderIfEmpty
+                                       else renderNonEmpty $ V.toList ary
           _ -> typeError "Can only iterate over lists"
     where renderIfEmpty = maybe (return "") renderContents ifempty
           renderNonEmpty lst = T.concat <$> iterations lst
@@ -275,41 +274,41 @@ renderCallCommand (CallCommand target calldata params) =
        additional' <- evalAdditional
        renderTemplate (HM.union params' additional') file targetTempl
     where evalParam (ParamExpr exp) = evalExpr exp
-          evalParam (ParamTemplate conts) = Just . ValString <$> renderContents conts
+          evalParam (ParamTemplate conts) = Just . J.toJSON <$> renderContents conts
           mapper (name, arg) = (name,) <$> evalParam arg
           processParams lst = [ (k, v) | (k, Just v) <- lst ]
           evalAdditional = case calldata of
                               Just CallDataAll -> call_variables <$> getCurrentCall
                               Just (CallDataExpr exp) -> evalExprDefined exp >>= mapOrError
                               Nothing -> return HM.empty
-          mapOrError (ValMap m) = return m
+          mapOrError (J.Object m) = return m
           mapOrError _ = typeError $ "Expected map"
 
 -- I tried to mimick the Java backend here, which seems to have more
 -- well-defined semantics than the JS backend (the latter just leaves most of
 -- the logic to the Javascript engine)
-followPath :: [Expr] -> Maybe Value -> RenderM (Maybe Value)
+followPath :: [Expr] -> Maybe J.Value -> RenderM (Maybe J.Value)
 followPath [] value = return value
-followPath (e:es) (Just (ValList lst)) =
+followPath (e:es) (Just (J.Array ary)) =
     do x <- evalExpr e
        case x of
-          Just (ValInt i) -> followPath es $ atMay lst (fromInteger i)
-          Just (ValString s) ->
+          Just (J.Number (J.I i)) -> followPath es (ary !? fromInteger i)
+          Just (J.String s) ->
              case readMay $ T.unpack s of
-                Just i -> followPath es $ atMay lst i
+                Just i -> followPath es (ary !? i)
                 _ -> return Nothing
           _ -> typeError "List index: Expected integer or integer-like string"
-followPath (e:es) (Just (ValMap hm)) =
+followPath (e:es) (Just (J.Object hm)) =
     do key <- evalExprDefined e
        case key of
-          ValInt i -> throwError $ TypeError "Cannot access a map item by index"
+          J.Number (J.I i) -> throwError $ TypeError "Cannot access a map item by index"
           _ -> followPath es $ HM.lookup (valToString key) hm
 followPath _ _ = return Nothing
 
 findLocal :: Identifier -> [(Identifier, LocalVar)] -> Maybe LocalVar
 findLocal name locals = fmap snd $ find ((name==) . fst) locals
 
-lookupVar :: Variable -> RenderM (Maybe Value)
+lookupVar :: Variable -> RenderM (Maybe J.Value)
 lookupVar var =
     case var of
        InjectedVar loc -> asksConfig cfg_injected >>= lookupHM loc
@@ -319,34 +318,33 @@ lookupVar var =
           lookupLocal loc@(Location root path) locals =
              case findLocal root locals of
                 Just var -> followPath path $ Just (var_value var)
-                Nothing -> liftM call_variables getCurrentCall >>= lookupHM loc
+                Nothing -> getCurrentCall >>= lookupHM loc . call_variables
 
-valToString :: Value -> T.Text
+valToString :: J.Value -> T.Text
 valToString val =
     case val of
-        ValNull -> "null"
-        ValBool True -> "true"
-        ValBool False -> "false"
-        ValString s -> s
-        ValInt i -> showT i
-        ValFloat f -> showT f
-        ValList lst -> showListLike "[" "]" $ map valToString lst
-        ValMap hm -> showListLike "{" "}" $ map pairToStr (HM.toList hm)
+        J.Null -> "null"
+        J.Bool True -> "true"
+        J.Bool False -> "false"
+        J.String s -> s
+        J.Number n -> showT n
+        J.Array ary -> showListLike "[" "]" $ map valToString $ V.toList ary
+        J.Object hm -> showListLike "{" "}" $ map pairToStr $ HM.toList hm
     where pairToStr (k, v) = T.concat [k, ": ", valToString v]
           showListLike l r lst = T.concat [l, T.intercalate ", " lst, r]
 
-valToBool :: Maybe Value -> Bool
+valToBool :: Maybe J.Value -> Bool
 valToBool val =
     case val of
         Nothing -> False
-        Just ValNull -> False
-        Just (ValBool b) -> b
-        Just (ValString s) -> s /= T.empty
-        Just (ValInt 0) -> False
-        Just (ValFloat 0.0) -> False
+        Just J.Null -> False
+        Just (J.Bool b) -> b
+        Just (J.String s) -> not $ T.null s
+        Just (J.Number (J.I 0)) -> False
+        Just (J.Number (J.D 0.0)) -> False
         _ -> True
 
-evalExpr :: Expr -> RenderM (Maybe Value)
+evalExpr :: Expr -> RenderM (Maybe J.Value)
 evalExpr exp =
     case exp of
         ExprLiteral lit -> Just <$> evalLiteral lit
@@ -354,7 +352,7 @@ evalExpr exp =
         ExprOp op -> evalOp op
         ExprFuncCall call -> Just <$> evalFuncCall call
 
-evalFuncCall :: FuncCall -> RenderM Value
+evalFuncCall :: FuncCall -> RenderM J.Value
 evalFuncCall (FuncCall name args) =
     do evaluatedArgs <- mapM evalExprDefined args
        functions <- asksConfig cfg_functions
@@ -363,10 +361,10 @@ evalFuncCall (FuncCall name args) =
          Just (SpecialFunction f) -> f args
          Nothing -> throwError $ LookupError $ T.append "Function not found: " name
 
-evalOp :: OpExpr -> RenderM (Maybe Value)
+evalOp :: OpExpr -> RenderM (Maybe J.Value)
 evalOp op =
     case op of
-        OpNot exp -> Just . ValBool . not <$> evalBoolean exp
+        OpNot exp -> Just . J.toJSON . not <$> evalBoolean exp
         OpNeg exp -> Just <$> (evalExprDefined exp >>= evalNeg)
         OpMul e1 e2 -> liftBinOp (evalArithmeticOp (*)) e1 e2
         OpDiv e1 e2 -> liftBinOp evalDiv e1 e2
@@ -379,11 +377,11 @@ evalOp op =
         OpLessEq e1 e2 -> liftBinOp (evalCmp (<=)) e1 e2
         OpEqual e1 e2 -> liftBinOp (evalEq (==)) e1 e2
         OpNotEqual e1 e2 -> liftBinOp (evalEq (/=)) e1 e2
-        OpAnd e1 e2 -> Just . ValBool <$> allM (valsToBool [e1, e2])
-        OpOr e1 e2 -> Just . ValBool <$> anyM (valsToBool [e1, e2])
+        OpAnd e1 e2 -> Just . J.toJSON <$> allM (valsToBool [e1, e2])
+        OpOr e1 e2 -> Just . J.toJSON <$> anyM (valsToBool [e1, e2])
         OpConditional cond true false ->
               evalBoolean cond >>= evalExpr . switch true false
-    where evalEq cmp a b = return $ ValBool (a `cmp` b)
+    where evalEq cmp a b = returnJSON (a `cmp` b)
           liftBinOp f e1 e2 =
               do v1 <- evalExprDefined e1
                  v2 <- evalExprDefined e2
@@ -391,64 +389,56 @@ evalOp op =
                  return $ Just res
           valsToBool = map evalBoolean
 
-evalPlus :: (MonadError SoyError m) => Value -> Value -> m Value
-evalPlus (ValString x) y = return $ ValString $ T.append x (valToString y)
-evalPlus x (ValString y) = return $ ValString $ T.append (valToString x) y
+evalPlus :: (MonadError SoyError m) => J.Value -> J.Value -> m J.Value
+evalPlus (J.String x) y = returnJSON $ T.append x (valToString y)
+evalPlus x (J.String y) = returnJSON $ T.append (valToString x) y
 evalPlus x y = evalArithmeticOp (+) x y
 
-evalNeg :: (MonadError SoyError m) => Value -> m Value
+evalNeg :: (MonadError SoyError m) => J.Value -> m J.Value
 evalNeg x = case x of
-                ValInt i -> return $ ValInt $ (-i)
-                ValFloat d -> return $ ValFloat $ (-d)
+                J.Number i -> returnJSON (-i)
                 _ -> typeError "Cannot negate a non-number"
 
 evalCmpBool :: (MonadError SoyError m)
             => (forall a. Ord a => a -> a -> Bool)
-            -> Value -> Value
+            -> J.Value -> J.Value
             -> m Bool
-evalCmpBool cmp (ValInt i) (ValInt j) = return $ cmp i j
-evalCmpBool cmp (ValFloat i) (ValFloat j) = return $ cmp i j
-evalCmpBool cmp (ValString i) (ValString j) = return $ cmp i j
+evalCmpBool cmp (J.Number x) (J.Number y) = return $ cmp x y
+evalCmpBool cmp (J.String x) (J.String y) = return $ cmp x y
 evalCmpBool _ _ _ = typeError "Cannot compare values of this kind"
 
-evalCmp :: (MonadError SoyError m) => (forall a. Ord a => a -> a -> Bool)
-        -> Value -> Value -> m Value
-evalCmp cmp a b = liftM ValBool $ evalCmpBool cmp a b
+evalCmp :: (MonadError SoyError m)
+        => (forall a. Ord a => a -> a -> Bool)
+        -> J.Value -> J.Value -> m J.Value
+evalCmp cmp a b = liftM J.toJSON $ evalCmpBool cmp a b
 
-evalMod :: (MonadError SoyError m) => Value -> Value -> m Value
-evalMod (ValInt i) (ValInt j) = return $ ValInt (i `mod` j)
+evalMod :: (MonadError SoyError m) => J.Value -> J.Value -> m J.Value
+evalMod (J.Number (J.I i)) (J.Number (J.I j)) = returnJSON $ i `mod` j
 evalMod _ _ = typeError "Cannot apply modulo to non-integers"
 
-evalDiv :: (MonadError SoyError m) => Value -> Value -> m Value
-evalDiv (ValInt i) (ValInt j) = return $ ValFloat $ (fromIntegral i) / (fromIntegral j)
-evalDiv (ValFloat i) (ValFloat j) = return $ ValFloat (i / j)
-evalDiv (ValFloat i) (ValInt j) = return $ ValFloat $ i / (fromIntegral j)
-evalDiv (ValInt i) (ValFloat j) = return $ ValFloat $ (fromIntegral i) / j
+evalDiv :: (MonadError SoyError m) => J.Value -> J.Value -> m J.Value
+evalDiv (J.Number x) (J.Number y) = return $ J.Number $ x / y
 evalDiv _ _ = typeError "Cannot divide non-numbers"
 
 evalArithmeticOp :: (MonadError SoyError m)
-                 => (forall a. Num a => a -> a -> a)
-                 -> Value -> Value
-                 -> m Value
-evalArithmeticOp op (ValInt i) (ValInt j) = return $ ValInt (op i j)
-evalArithmeticOp op (ValFloat i) (ValFloat j) = return $ ValFloat (op i j)
-evalArithmeticOp op (ValFloat i) (ValInt j) = return $ ValFloat (op i (fromIntegral j))
-evalArithmeticOp op (ValInt i) (ValFloat j) = return $ ValFloat (op (fromIntegral i) j)
+                 => (J.Number -> J.Number -> J.Number)
+                 -> J.Value -> J.Value
+                 -> m J.Value
+evalArithmeticOp op (J.Number x) (J.Number y) = returnJSON $ op x y
 evalArithmeticOp _ _ _ = typeError "Cannot do arithmetics on values of this kind"
 
-evalExprDefined :: Expr -> RenderM Value
+evalExprDefined :: Expr -> RenderM J.Value
 evalExprDefined exp = evalExpr exp >>= maybe err return
     where err = typeError "Encountered undefined while evaluating an expression"
 
-evalLiteral :: Literal -> RenderM Value
+evalLiteral :: Literal -> RenderM J.Value
 evalLiteral lit = case lit of
-                    LiteralNull -> return ValNull
-                    LiteralString s -> return $ ValString s
-                    LiteralInt i -> return $ ValInt i
-                    LiteralFloat d -> return $ ValFloat d
-                    LiteralBool b -> return $ ValBool b
-                    LiteralList lst -> ValList <$> mapM evalExprDefined lst
-                    LiteralMap m -> ValMap . HM.fromList <$> mapM mapper m
+                    LiteralNull -> return J.Null
+                    LiteralString s -> returnJSON s
+                    LiteralNumber i -> returnJSON i
+                    LiteralBool b -> returnJSON b
+                    LiteralList lst -> J.toJSON . V.fromList <$> mapM evalExprDefined lst
+                    LiteralMap m -> J.toJSON . HM.fromList <$> mapM mapper m
     where mapper (ke, ve) = do k <- evalStr ke
                                v <- evalExprDefined ve
                                return (k, v)
@@ -457,7 +447,7 @@ evalInt :: Expr -> RenderM Integer
 evalInt exp =
     do val <- evalExprDefined exp
        case val of
-          ValInt i -> return i
+          J.Number (J.I i) -> return i
           _ -> typeError "Expected an integer"
 
 evalStr :: Expr -> RenderM T.Text
@@ -482,82 +472,58 @@ builtinFunctions =
     , ("isLast", SpecialFunction func_isLast)
     , ("index", SpecialFunction func_index)
     , ("randomInt", SpecialFunction func_randomInt)
-    , ("debug", SpecialFunction func_debug)
-    , ("toJson", PureFunction func_toJson)
     ]
 
 funcError :: (MonadError SoyError m) => T.Text -> m a
 funcError f = typeError $
     T.append "Wrong argument count or type mismatch in function call to " f
 
-debugCtx :: RenderM T.Text
-debugCtx =
-    do cs <- asksContext ctx_callStack
-       ls <- asksContext ctx_localStack
-       glob <- asksConfig cfg_globals
-       inj <- asksConfig cfg_injected
-       return $ T.concat [ showT cs, showT ls, showT glob, showT inj ]
-
-func_debug :: [Expr] -> RenderM Value
-func_debug [] = liftM ValString $ debugCtx
-func_debug _ = funcError "debug()"
-
-func_length :: [Value] -> Either SoyError Value
-func_length [ValList lst] = return $ ValInt $ fromIntegral (length lst)
-func_length [ValString s] = return $ ValInt $ fromIntegral (T.length s)
+func_length :: [J.Value] -> Either SoyError J.Value
+func_length [J.Array ary] = returnJSON $ V.length ary
 func_length _ = funcError "length(<list>)"
 
-func_keys :: [Value] -> Either SoyError Value
-func_keys [ValMap hm] = return $ ValList (map ValString (HM.keys hm))
+func_keys :: [J.Value] -> Either SoyError J.Value
+func_keys [J.Object hm] = returnJSON $ map J.toJSON $ HM.keys hm
 func_keys _ = funcError "keys(<map>)"
 
-func_round :: [Value] -> Either SoyError Value
-func_round [ValFloat d] = return $ ValInt $ round d
-func_round [x@(ValInt i)] = return x
-func_round [ValFloat x, ValInt d] =
-    return $ if d > 0 then ValFloat $ (fromIntegral $ round (x * (10^d))) / 10^d
-                      else ValInt $ (round (x / (10^(-d)))) * 10^(-d)
-func_round [ValInt x, ValInt d] =
-    return $ ValInt $ if d >= 0 then x else (x `div` 10^(-d)) * 10^(-d)
-func_round _ = funcError "round(<float>[, <int>])"
+func_round :: [J.Value] -> Either SoyError J.Value
+func_round [J.Number x] = returnJSON $ toInteger $ round x
+func_round [J.Number (J.D x), J.Number (J.I d)] =
+    returnJSON $
+        if d > 0 then J.D $ (fromIntegral $ round (x * (10^d))) / 10^d
+                 else J.I $ (round (x / (10^(-d)))) * 10^(-d)
+func_round [J.Number (J.I x), J.Number (J.I d)] =
+    returnJSON $ if d >= 0 then x else (x `div` 10^(-d)) * 10^(-d)
+func_round _ = funcError "round(<number>[, <int>])"
 
-func_floor :: [Value] -> Either SoyError Value
-func_floor [ValFloat d] = return $ ValInt $ floor d
-func_floor [x@(ValInt i)] = return $ x
+func_floor :: [J.Value] -> Either SoyError J.Value
+func_floor [J.Number x] = returnJSON $ toInteger $ floor x
 func_floor _ = funcError "floor(<number>)"
 
-func_ceiling :: [Value] -> Either SoyError Value
-func_ceiling [ValFloat d] = return $ ValInt $ ceiling d
-func_ceiling [x@(ValInt i)] = return $ x
+func_ceiling :: [J.Value] -> Either SoyError J.Value
+func_ceiling [J.Number x] = returnJSON $ toInteger $ ceiling x
 func_ceiling _ = funcError "ceiling(<number>)"
 
-func_min :: [Value] -> Either SoyError Value
-func_min [x, y] = evalCmpBool (<) x y >>= result
-    where result b = return $ if b then x else y
+func_min :: [J.Value] -> Either SoyError J.Value
+func_min [x, y] = evalCmpBool (<) x y >>= return . switch x y
 func_min _ = funcError "min(<number>)"
 
-func_max :: [Value] -> Either SoyError Value
-func_max [x, y] = evalCmpBool (>) x y >>= result
-    where result b = return $ if b then x else y
+func_max :: [J.Value] -> Either SoyError J.Value
+func_max [x, y] = evalCmpBool (>) x y >>= return . switch x y
 func_max _ = funcError "max(<number>)"
 
-func_toJson :: [Value] -> Either SoyError Value
-func_toJson [v] = return $ ValString $ jsonToStrictText v
-    where jsonToStrictText = TL.toStrict . TLB.toLazyText . J.fromValue . J.toJSON
-func_toJson _ = funcError "dump(<obj>)"
-
-func_isItem :: [Value] -> Either SoyError Value
-func_isItem [x, ValList lst] = return $ ValBool $ x `elem` lst
+func_isItem :: [J.Value] -> Either SoyError J.Value
+func_isItem [x, J.Array ary] = returnJSON $ x `V.elem` ary
 func_isItem _ = funcError "isItem(<obj>, <list>)"
 
-func_randomInt :: [Expr] -> RenderM Value
+func_randomInt :: [Expr] -> RenderM J.Value
 func_randomInt [exp] =
-    do upper <- evalExpr exp
+    do upper <- evalExprDefined exp
        case upper of
-          Just (ValInt i) ->
+          J.Number (J.I i) ->
               do gen <- gets state_random
                  let (val, gen') = randomR (0, i - 1) gen
-                 return $ ValInt val
+                 returnJSON val
           _ -> funcError "randomInt(<int>)"
 func_randomInt _ = funcError "randomInt(<int>)"
 
@@ -568,19 +534,20 @@ getForeachVar var = asksContext ctx_localStack >>= findVar var
                 Just (ForeachVar _ index total) -> return $ (index, total)
                 _ -> typeError $ T.concat ["$", var, " is not a foreach loop variable"]
 
-func_index :: [Expr] -> RenderM Value
+func_index :: [Expr] -> RenderM J.Value
 func_index [ExprVar (LocalVar (Location var []))] =
-    liftM (ValInt . toInteger . fst) $ getForeachVar var
+    J.toJSON . fst <$> getForeachVar var
 func_index _ = funcError "index($<foreach variable>)"
 
-func_isFirst :: [Expr] -> RenderM Value
+func_isFirst :: [Expr] -> RenderM J.Value
 func_isFirst [ExprVar (LocalVar (Location var []))] =
-    liftM (ValBool . (0==) . fst) $ getForeachVar var
+    J.toJSON . (0==) . fst <$> getForeachVar var
 func_isFirst _ = funcError "isFirst($<foreach variable>)"
 
-func_isLast :: [Expr] -> RenderM Value
+func_isLast :: [Expr] -> RenderM J.Value
 func_isLast [ExprVar (LocalVar (Location var []))] =
-    liftM (\(i, size) -> ValBool $ i + 1 == size) $ getForeachVar var
+    J.toJSON . isLast <$> getForeachVar var
+    where isLast (i, size) = i + 1 == size
 func_isLast _ = funcError "isLast($<foreach variable>)"
 
 -- helpers
@@ -603,16 +570,23 @@ findM :: (Monad m) => (a -> m Bool) -> [a] -> m (Maybe a)
 findM f (x:xs) = f x >>= (\b -> if b then return $ Just x else findM f xs)
 findM f [] = return Nothing
 
+returnJSON :: (J.ToJSON a, Monad m) => a -> m J.Value
+returnJSON = return . J.toJSON
+
 -- ==============================================================
 --Testing
 -- ==============================================================
 
-litInt x = ExprLiteral (LiteralInt x)
-litFloat x = ExprLiteral (LiteralFloat x)
-litStr x = ExprLiteral (LiteralString x)
-litBool x = ExprLiteral (LiteralBool x)
-litList x  = ExprLiteral (LiteralList x)
-litMap x  = ExprLiteral (LiteralMap x)
+valInt = J.Number . J.I
+valFloat = J.Number . J.D
+valMap = J.Object . HM.fromList
+
+exprInt x = ExprLiteral (LiteralNumber $ J.I x)
+exprFloat x = ExprLiteral (LiteralNumber $ J.D x)
+exprStr x = ExprLiteral (LiteralString x)
+exprBool x = ExprLiteral (LiteralBool x)
+exprList x  = ExprLiteral (LiteralList x)
+exprMap x  = ExprLiteral (LiteralMap x)
 undefinedExpr = ExprVar (LocalVar (Location "notexisting" []))
 
 printVar t var = CommandPrint (PrintCommand (ExprVar (t (Location var []))) [])
@@ -682,12 +656,12 @@ test_findTemplate = testRenderM testConfig testContext findTemplate
 uncurry3 f (a,b,c) = f a b c
 
 test_renderTemplate = testRenderM (testConfig
-        { cfg_globals = HM.fromList [("foo", ValInt 2)]
-        , cfg_injected = HM.fromList [("foo", ValInt 3)]
+        { cfg_globals = HM.fromList [("foo", valInt 2)]
+        , cfg_injected = HM.fromList [("foo", valInt 3)]
         })
         testContext
         (uncurry3 renderTemplate)
-    [ ((HM.fromList [("foo", ValInt 1)], ns, print_all_foos), "123")
+    [ ((HM.fromList [("foo", valInt 1)], ns, print_all_foos), "123")
     ]
     []
 
@@ -714,32 +688,32 @@ test_renderPrintCommand = testRenderM
                       "fo<wbr>ob<wbr>a fo<wbr>ob<wbr>a")
     ]
     []
-    where printStr str dir = PrintCommand (litStr str) dir
+    where printStr str dir = PrintCommand (exprStr str) dir
 
 test_renderIfCommand = testRenderM testConfig testContext renderIfCommand
-    [ (IfCommand [ (litBool False, [ContentText "foo"])
-                 , (litBool True, [ContentText "bar"])
+    [ (IfCommand [ (exprBool False, [ContentText "foo"])
+                 , (exprBool True, [ContentText "bar"])
                  ]
                  (Just [ContentText "baz"]),
             "bar")
-    , (IfCommand [ (litBool True, [ContentText "foo"])
-                 , (litBool False, [ContentText "bar"])
+    , (IfCommand [ (exprBool True, [ContentText "foo"])
+                 , (exprBool False, [ContentText "bar"])
                  ]
                  (Just [ContentText "baz"]),
             "foo")
-    , (IfCommand [ (litBool False, [ContentText "foo"])
-                 , (litBool False, [ContentText "bar"])
+    , (IfCommand [ (exprBool False, [ContentText "foo"])
+                 , (exprBool False, [ContentText "bar"])
                  ]
                  (Just [ContentText "baz"]),
             "baz")
-    , (IfCommand [ (litBool False, [ContentText "foo"])
-                 , (litBool False, [ContentCommand
+    , (IfCommand [ (exprBool False, [ContentText "foo"])
+                 , (exprBool False, [ContentCommand
                       (CommandPrint (PrintCommand
                           (ExprVar (LocalVar (Location "notexisting" []))) []))])
                  ]
                  (Just [ContentText "baz"]),
             "baz")
-    , (IfCommand [ (litBool True, [ContentText "foo"])
+    , (IfCommand [ (exprBool True, [ContentText "foo"])
                  , (ExprVar (LocalVar (Location "notexisting" [])), [ContentText "bar"])
                  ]
                  Nothing,
@@ -748,19 +722,19 @@ test_renderIfCommand = testRenderM testConfig testContext renderIfCommand
     []
 
 test_renderSwitchCommand = testRenderM testConfig testContext renderSwitchCommand
-    [ (SwitchCommand (litInt 2)
-                     [ ([litInt 1, litStr "test"], [ContentText "foo"])
-                     , ([litInt 3, litInt 2], [ContentText "bar"]) ]
+    [ (SwitchCommand (exprInt 2)
+                     [ ([exprInt 1, exprStr "test"], [ContentText "foo"])
+                     , ([exprInt 3, exprInt 2], [ContentText "bar"]) ]
                      Nothing,
             "bar")
-    , (SwitchCommand (litInt 4)
-                     [ ([litInt 1, litStr "test"], [ContentText "foo"])
-                     , ([litInt 2, litInt 3], [ContentText "bar"]) ]
+    , (SwitchCommand (exprInt 4)
+                     [ ([exprInt 1, exprStr "test"], [ContentText "foo"])
+                     , ([exprInt 2, exprInt 3], [ContentText "bar"]) ]
                      Nothing,
             "")
-    , (SwitchCommand (litInt 4)
-                     [ ([litInt 1, litStr "test"], [ContentText "foo"])
-                     , ([litInt 2, litInt 3], [ContentText "bar"]) ]
+    , (SwitchCommand (exprInt 4)
+                     [ ([exprInt 1, exprStr "test"], [ContentText "foo"])
+                     , ([exprInt 2, exprInt 3], [ContentText "bar"]) ]
                      (Just [ContentText "baz"]),
             "baz")
     ]
@@ -768,12 +742,12 @@ test_renderSwitchCommand = testRenderM testConfig testContext renderSwitchComman
 
 test_renderForeachCommand = testRenderM testConfig testContext renderForeachCommand
     [ (ForeachCommand "iter"
-                      (litList [ litInt 1, litStr "foo", litInt 3 ])
+                      (exprList [ exprInt 1, exprStr "foo", exprInt 3 ])
                       [ ContentCommand (printVar LocalVar "iter") ]
                       Nothing,
             "1foo3")
     , (ForeachCommand "iter"
-                      (litList [ litInt 1, litStr "foo", litInt 3 ])
+                      (exprList [ exprInt 1, exprStr "foo", exprInt 3 ])
                       [ funcCall "isFirst" [ localVar "iter" ]
                       , funcCall "isLast" [ localVar "iter" ]
                       , funcCall "index" [ localVar "iter" ]
@@ -781,14 +755,14 @@ test_renderForeachCommand = testRenderM testConfig testContext renderForeachComm
                       Nothing,
             "truefalse0falsefalse1falsetrue2")
     , (ForeachCommand "iter"
-                      (litList [])
+                      (exprList [])
                       [ContentText "foo"]
                       (Just [ContentText "bar"]),
             "bar")
     , (ForeachCommand "iter"
-            (litList [ litInt 1, litInt 2, litInt 3 ])
+            (exprList [ exprInt 1, exprInt 2, exprInt 3 ])
             [ ContentCommand (CommandForeach (ForeachCommand "iter"
-                (litList [ litInt 3, litInt 4 ])
+                (exprList [ exprInt 3, exprInt 4 ])
                 [ ContentCommand (printVar LocalVar "iter") ]
                 Nothing))]
             Nothing,
@@ -800,7 +774,7 @@ test_renderForeachCommand = testRenderM testConfig testContext renderForeachComm
           localVar var = ExprVar (LocalVar (Location var []))
 
 test_renderForCommand = testRenderM testConfig testContext renderForCommand
-    [ (ForCommand "iter" (litInt 0) (litInt 6) (litInt 2)
+    [ (ForCommand "iter" (exprInt 0) (exprInt 6) (exprInt 2)
             [ ContentCommand (CommandPrint (PrintCommand
                 (ExprVar (LocalVar (Location "iter" []))) []))
             ],
@@ -811,150 +785,174 @@ test_renderForCommand = testRenderM testConfig testContext renderForCommand
 test_renderCallCommand = testRenderM
         testConfig
         testContext
-        { ctx_currentCall = Call ns print_foo $ HM.fromList [("param1", ValInt 1)]
+        { ctx_currentCall = Call ns print_foo $ HM.fromList [("param1", valInt 1)]
         }
         renderCallCommand
     [ (CallCommand (PathFull ["ns", "print_param1"]) Nothing
-                  [("param1", ParamExpr (litStr "'"))],
+                  [("param1", ParamExpr (exprStr "'"))],
             "'")
     , (CallCommand (PathFull ["ns", "print_param12"]) Nothing
                   [ ("param1", ParamTemplate
-                       [ ContentCommand (CommandPrint (PrintCommand (litStr "test") [])) ])
-                  , ("param2", ParamExpr (litInt 2))
+                       [ ContentCommand (CommandPrint (PrintCommand (exprStr "test") [])) ])
+                  , ("param2", ParamExpr (exprInt 2))
                   ],
             "test2")
     , (CallCommand (PathFull ["ns", "print_param2"]) Nothing
-                  [("param2", ParamExpr (litStr "'"))],
+                  [("param2", ParamExpr (exprStr "'"))],
             "&#x27;")
     , (CallCommand (PathFull ["ns", "print_param1"]) (Just CallDataAll) [],
             "1")
     , (CallCommand (PathFull ["ns", "print_param1"])
-               (Just (CallDataExpr (litMap [(litStr "param1", litInt 2)]))) [],
+               (Just (CallDataExpr (exprMap [(exprStr "param1", exprInt 2)]))) [],
             "2")
     , (CallCommand (PathFull ["ns", "print_param12"]) (Just CallDataAll)
-                  [("param2", ParamExpr (litInt 3))],
+                  [("param2", ParamExpr (exprInt 3))],
             "13")
     ]
-    [ CallCommand (PathFull ["ns", "print_param1"]) (Just (CallDataExpr (litInt 1))) []
+    [ CallCommand (PathFull ["ns", "print_param1"]) (Just (CallDataExpr (exprInt 1))) []
     ]
 
 test_followPath = testRenderM testConfig testContext (uncurry followPath)
-    [ (([litInt 0, litStr "0"],
-        Just $ ValList [ValList [ValInt 1]]),
-                      Just $ ValInt 1)
-    , (([litStr "0"], Just $ ValList [ValInt 1]), Just $ ValInt 1)
-    , (([litInt (-10)], Just $ ValList [ValInt 1]), Nothing)
+    [ (([exprInt 0, exprStr "0"],
+        Just $ J.toJSON [J.toJSON [valInt 1]]),
+                      Just $ valInt 1)
+    , (([exprStr "0"], Just $ J.toJSON [valInt 1]), Just $ valInt 1)
+    , (([exprInt (-10)], Just $ J.toJSON [valInt 1]), Nothing)
 
-    , (([litStr "a", litFloat 0, litList [], litMap []],
+    , (([exprStr "a", exprFloat 0, exprList [], exprMap []],
             Just $ valMap [("a",
                             valMap [("0.0",
                                      valMap [("[]",
                                               valMap [("{}",
-                                                       ValInt 1)])])])]),
-            Just $ ValInt 1)
-    , (([litStr "test"], Just $ ValMap (HM.fromList [])), Nothing)
+                                                       valInt 1)])])])]),
+            Just $ valInt 1)
+    , (([exprStr "test"], Just $ J.Object HM.empty), Nothing)
 
-    , (([litStr "test"], Nothing), Nothing)
+    , (([exprStr "test"], Nothing), Nothing)
     , (([undefinedExpr], Nothing), Nothing)
     ]
 
-    [ ([undefinedExpr], Just $ ValList [ValInt 1])
-    , ([litFloat 0.0], Just $ ValList [ValInt 1])
+    [ ([undefinedExpr], Just $ J.toJSON [valInt 1])
+    , ([exprFloat 0.0], Just $ J.toJSON [valInt 1])
 
-    , ([undefinedExpr], Just $ valMap [("test", ValInt 1)])
-    , ([litInt 1], Just $ valMap [("test", ValInt 1)])
+    , ([undefinedExpr], Just $ valMap [("test", valInt 1)])
+    , ([exprInt 1], Just $ valMap [("test", valInt 1)])
     ]
-
-    where valMap = ValMap . HM.fromList
 
 test_lookupVar = testRenderM
         testConfig
         { cfg_globals = (HM.fromList
-            [ ("global", ValInt 1) ])
+            [ ("global", valInt 1) ])
         , cfg_injected = (HM.fromList
-            [ ("ij", ValInt 2) ])
+            [ ("ij", valInt 2) ])
         }
         testContext
         { ctx_currentCall = Call ns print_foo (HM.fromList
-                                [ ("foo", ValInt 6) ])
+                                [ ("foo", valInt 6) ])
         , ctx_localStack =
-            [ ("foo", SimpleVar (ValInt 3))
-            , ("bar", ForeachVar (ValInt 4) 0 1)
-            , ("bar", SimpleVar (ValInt 5))
+            [ ("foo", SimpleVar (valInt 3))
+            , ("bar", ForeachVar (valInt 4) 0 1)
+            , ("bar", SimpleVar (valInt 5))
             ]
         }
         lookupVar
-    [ (GlobalVar (Location "global" []), Just $ ValInt 1)
-    , (InjectedVar (Location "ij" []), Just $ ValInt 2)
-    , (LocalVar (Location "foo" []), Just $ ValInt 3)
-    , (LocalVar (Location "bar" []), Just $ ValInt 4)
+    [ (GlobalVar (Location "global" []), Just $ valInt 1)
+    , (InjectedVar (Location "ij" []), Just $ valInt 2)
+    , (LocalVar (Location "foo" []), Just $ valInt 3)
+    , (LocalVar (Location "bar" []), Just $ valInt 4)
     , (GlobalVar (Location "ij" []), Nothing)
     , (InjectedVar (Location "global" []), Nothing)
     , (LocalVar (Location "global" []), Nothing)
     ]
     []
 
+test_valToString =
+    do assertEqual (valToString (valMap [])) "{}"
+       assertEqual (valToString (valFloat (0.0/0.0))) "NaN"
+       assertEqual (valToString (valFloat (1.0/0.0))) "Infinity"
+       assertEqual (valToString (valFloat ((-1.0)/0.0))) "-Infinity"
+
 test_evalLiteral = testRenderM testConfig testContext evalLiteral
-    [ (LiteralList [ litInt 1, litInt 2 ],
-            ValList [ ValInt 1, ValInt 2 ])
-    , (LiteralMap [(litStr "test", litInt 1), (litStr "abc", litInt 2)],
-            ValMap $ HM.fromList [("test", ValInt 1), ("abc", ValInt 2)])
+    [ (LiteralList [ exprInt 1, exprInt 2 ],
+            J.toJSON [ valInt 1, valInt 2 ])
+    , (LiteralMap [(exprStr "test", exprInt 1), (exprStr "abc", exprInt 2)],
+            valMap [("test", valInt 1), ("abc", valInt 2)])
     ]
     []
 
 test_evalOp = testRenderM testConfig testContext evalOp
-    [ (OpNot (litBool True), Just $ ValBool False)
-    , (OpNot (litBool False), Just $ ValBool True)
-    , (OpNeg (litInt (-10)), Just $ ValInt 10)
-    , (OpNeg (litFloat 10.0), Just $ ValFloat (-10.0))
-    , (OpMul (litFloat 2) (litFloat 3), Just $ ValFloat 6)
-    , (OpMul (litInt 2) (litInt 3), Just $ ValInt 6)
-    , (OpMul (litInt 2) (litFloat 3), Just $ ValFloat 6)
-    , (OpMul (litFloat 2) (litInt 3), Just $ ValFloat 6)
-    , (OpDiv (litFloat 10) (litFloat 5), Just $ ValFloat 2)
-    , (OpDiv (litInt 10) (litInt 5), Just $ ValFloat 2)
-    , (OpMod (litInt 10) (litInt 4), Just $ ValInt 2)
-    , (OpPlus (litInt 10) (litInt 4), Just $ ValInt 14)
-    , (OpPlus (litStr "test") (litInt 4), Just $ ValString "test4")
-    , (OpMinus (litInt 10) (litInt 4), Just $ ValInt 6)
-    , (OpGreater (litInt 10) (litInt 4), Just $ ValBool True)
-    , (OpGreaterEq (litInt 10) (litInt 10), Just $ ValBool True)
-    , (OpLess (litInt 10) (litInt 4), Just $ ValBool False)
-    , (OpLess (litStr "a") (litStr "b"), Just $ ValBool True)
-    , (OpLessEq (litStr "b") (litStr "a"), Just $ ValBool False)
-    , (OpEqual (litInt 1) (litInt 1), Just $ ValBool True)
-    , (OpNotEqual (litInt 1) (litInt 1), Just $ ValBool False)
-    , (OpAnd (litBool True) (litBool False), Just $ ValBool False)
-    , (OpAnd (litBool False) undefinedExpr, Just $ ValBool False)
-    , (OpOr (litBool False) (litBool False), Just $ ValBool False)
-    , (OpOr (litBool True) undefinedExpr, Just $ ValBool True)
-    , (OpConditional (litBool True) (litInt 1) undefinedExpr, Just $ ValInt 1)
-    , (OpConditional (litBool False) undefinedExpr (litInt 2), Just $ ValInt 2)
+    [ (OpNot (exprBool True), Just $ J.toJSON False)
+    , (OpNot (exprBool False), Just $ J.toJSON True)
+
+    , (OpNeg (exprInt (-10)), Just $ valInt 10)
+    , (OpNeg (exprFloat 10.0), Just $ valFloat (-10.0))
+
+    , (OpMul (exprFloat 2) (exprFloat 3), Just $ valFloat 6)
+    , (OpMul (exprInt 2) (exprInt 3), Just $ valInt 6)
+    , (OpMul (exprInt 2) (exprFloat 3), Just $ valFloat 6)
+    , (OpMul (exprFloat 2) (exprInt 3), Just $ valFloat 6)
+
+    , (OpDiv (exprFloat 10) (exprFloat 5), Just $ valFloat 2)
+    , (OpDiv (exprInt 10) (exprInt 5), Just $ valFloat 2)
+    , (OpDiv (exprInt 3) (exprFloat 2), Just $ valFloat 1.5)
+
+    , (OpMod (exprInt 10) (exprInt 4), Just $ valInt 2)
+
+    , (OpPlus (exprInt 10) (exprInt 4), Just $ valInt 14)
+    , (OpPlus (exprStr "test") (exprInt 4), Just $ "test4")
+
+    , (OpMinus (exprInt 10) (exprInt 4), Just $ valInt 6)
+
+    , (OpGreater (exprInt 10) (exprInt 4), Just $ J.toJSON True)
+    , (OpGreater (exprFloat 0.9) (exprInt 1), Just $ J.toJSON False)
+
+    , (OpGreaterEq (exprInt 10) (exprInt 10), Just $ J.toJSON True)
+
+    , (OpLess (exprInt 10) (exprInt 4), Just $ J.toJSON False)
+    , (OpLess (exprStr "a") (exprStr "b"), Just $ J.toJSON True)
+
+    , (OpLessEq (exprStr "b") (exprStr "a"), Just $ J.toJSON False)
+
+    , (OpEqual (exprInt 1) (exprInt 2), Just $ J.toJSON False)
+    , (OpEqual (exprFloat 1.0) (exprInt 1), Just $ J.toJSON True)
+    , (OpEqual (exprStr "foo") (exprStr "foo"), Just $ J.toJSON True)
+
+    , (OpNotEqual (exprInt 1) (exprInt 1), Just $ J.toJSON False)
+
+    , (OpAnd (exprBool True) (exprBool False), Just $ J.toJSON False)
+    , (OpAnd (exprBool False) undefinedExpr, Just $ J.toJSON False)
+
+    , (OpOr (exprBool False) (exprBool False), Just $ J.toJSON False)
+    , (OpOr (exprBool True) undefinedExpr, Just $ J.toJSON True)
+
+    , (OpConditional (exprBool True) (exprInt 1) undefinedExpr, Just $ valInt 1)
+    , (OpConditional (exprBool False) undefinedExpr (exprInt 2), Just $ valInt 2)
     ]
-    []
+    [ OpMod (exprFloat 1) (exprInt 1)
+    ]
 
 test_round = testGen func_round
-    [ ([ValFloat 1.6], ValInt 2)
-    , ([ValInt 10], ValInt 10)
-    , ([ValFloat 123.456, ValInt 0], ValInt 123)
-    , ([ValFloat 123.456, ValInt 2], ValFloat 123.46)
-    , ([ValFloat 123.456, ValInt (-2)], ValInt 100)
-    , ([ValInt 12345, ValInt 0], ValInt 12345)
-    , ([ValInt 12345, ValInt 2], ValInt 12345)
-    , ([ValInt 12345, ValInt (-2)], ValInt 12300)
+    [ ([valFloat 1.6], valInt 2)
+    , ([valInt 10], valInt 10)
+    , ([valFloat 123.456, valInt 0], valInt 123)
+    , ([valFloat 123.456, valInt 2], valFloat 123.46)
+    , ([valFloat 123.456, valInt (-2)], valInt 100)
+    , ([valInt 12345, valInt 0], valInt 12345)
+    , ([valInt 12345, valInt 2], valInt 12345)
+    , ([valInt 12345, valInt (-2)], valInt 12300)
     ]
     []
 
 test_evalFuncCall = testRenderM testConfig testContext evalFuncCall
-    [ (FuncCall "length" [ litList [ litInt 1 ]], ValInt 1)
-    , (FuncCall "keys" [ litMap [(litStr "test", litInt 1)] ],
-            ValList [ ValString "test" ])
-    , (FuncCall "round" [litFloat 4.6], ValInt 5)
-    , (FuncCall "floor" [litFloat 4.2], ValInt 4)
-    , (FuncCall "ceiling" [litFloat 4.2], ValInt 5)
-    , (FuncCall "min" [litInt 1, litInt 2], ValInt 1)
-    , (FuncCall "max" [litStr "a", litStr "b"], ValString "b")
-    , (FuncCall "isItem" [litStr "a", litList [litStr "b", litStr "a"]], ValBool True)
-    , (FuncCall "isItem" [litStr "c", litList [litStr "b", litStr "a"]], ValBool False)
+    [ (FuncCall "length" [ exprList [ exprInt 1 ]], valInt 1)
+    , (FuncCall "keys" [ exprMap [(exprStr "test", exprInt 1)] ],
+            J.toJSON [ J.String "test" ])
+    , (FuncCall "round" [exprFloat 4.6], valInt 5)
+    , (FuncCall "floor" [exprFloat 4.2], valInt 4)
+    , (FuncCall "ceiling" [exprFloat 4.2], valInt 5)
+    , (FuncCall "min" [exprInt 1, exprInt 2], valInt 1)
+    , (FuncCall "max" [exprStr "a", exprStr "b"], "b")
+    , (FuncCall "isItem" [exprStr "a", exprList [exprStr "b", exprStr "a"]], J.toJSON True)
+    , (FuncCall "isItem" [exprStr "c", exprList [exprStr "b", exprStr "a"]], J.toJSON False)
     ]
     []
