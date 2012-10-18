@@ -2,7 +2,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE FlexibleContexts #-}
-module Soy.Types where
+module Language.Soy.Types where
 
 import qualified Data.Attoparsec.Number as J
 

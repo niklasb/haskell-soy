@@ -4,11 +4,22 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TupleSections #-}
-module Soy.Render where
+module Language.Soy.Render
+    ( RenderConfig
+    , render
+    , configure
+    , setup
+    , setRandomSeed
+    , setIOSeed
+    , addFiles
+    , addIjData
+    , addGlobalData
+    , addFunction
+    ) where
 
-import Soy.Parser (parseSoyFile)
-import Soy.Sanitization
-import Soy.Types
+import Language.Soy.Parser
+import Language.Soy.Sanitization
+import Language.Soy.Types
 
 import qualified Data.Aeson as J
 import qualified Data.Attoparsec.Number as J
@@ -611,7 +622,7 @@ undefinedExpr = ExprVar (LocalVar (Location "notexisting" []))
 
 printVar t var = CommandPrint (PrintCommand (ExprVar (t (Location var []))) [])
 
-tests = htfMain htf_Soy_Render_thisModulesTests
+tests = htfMain htf_Language_Soy_Render_thisModulesTests
 
 testOk a b = assertEqual (Right b) a
 testGen prep inout errin = mapM_ (\(x,y) -> testOk (prep x) y) inout

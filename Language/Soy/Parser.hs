@@ -2,10 +2,12 @@
 {-# OPTIONS_GHC -fwarn-unused-imports -fwarn-incomplete-patterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections #-}
-module Soy.Parser where
+module Language.Soy.Parser
+    ( parseSoyFile
+    ) where
 
-import Soy.Types
-import qualified Attoparsec.Expr as E
+import Language.Soy.Types
+import qualified Data.Attoparsec.Expr as E
 
 import Data.Attoparsec.Text
 import Test.Framework
@@ -21,10 +23,7 @@ import Data.Monoid
 import Numeric (readHex)
 
 parseSoyFile :: Monad m => T.Text -> m File
-parseSoyFile txt =
-    case parseOnly file txt of
-      Left err -> fail err
-      Right ok -> return ok
+parseSoyFile txt = either fail return $ parseOnly file txt
 
 file :: Parser File
 file = File <$> (optTopLevel_ *> namespace)
@@ -437,7 +436,7 @@ litFloat = LiteralNumber . D
 
 joinT = T.init . T.unlines
 
-tests = htfMain htf_Soy_Parser_thisModulesTests
+tests = htfMain htf_Language_Soy_Parser_thisModulesTests
 
 testParser p inout errin =
     do mapM_ (\(inp, exp) -> assertEqual (Right exp) (parseAll inp)) inout

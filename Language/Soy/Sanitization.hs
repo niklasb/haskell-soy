@@ -1,5 +1,9 @@
 {-# OPTIONS_GHC -fwarn-unused-imports -fwarn-incomplete-patterns #-}
-module Soy.Sanitization where
+module Language.Soy.Sanitization
+    ( escapeHtml
+    , escapeUri
+    , escapeJs
+    ) where
 
 import qualified Data.ByteString as BS
 import Data.Char
