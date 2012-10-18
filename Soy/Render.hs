@@ -165,16 +165,6 @@ renderTemplate :: HM.HashMap Identifier J.Value -> File -> Template -> RenderM T
 renderTemplate vars file template =
     do withTemplate file template vars $ renderContents (tmpl_content template)
 
-{-stripContent :: T.Text -> T.Text-}
-{-stripContent txt = T.concat segments-}
-    {-where notNull x = not $ T.null x-}
-          {-lines = filter notNull $ map T.strip $ T.lines txt-}
-          {-sep a b = if T.last a == '>' || T.head b == '<' then "" else " "-}
-          {-segments-}
-            {-| null lines = []-}
-            {-| otherwise = head lines : [ T.append (sep a b) b-}
-                                        {-| (a, b) <- zip lines (tail lines) ]-}
-
 -- implement the line joining heuristics
 stripContent :: T.Text -> T.Text
 stripContent txt = T.concat segments
@@ -678,9 +668,34 @@ test_stripContent =
 
 test_renderContents = testRenderM testConfig testContext renderContents
     [ ([ContentText "\n a ", ContentCommand (CommandText ""), ContentText " b \n"],
-             "a  b")
+            "a  b")
     , ([ContentCommand (CommandText ""), ContentText "  ", ContentCommand (CommandText "")],
-             "  ")
+            "  ")
+    , ([ ContentCommand (CommandText "")
+       , ContentText " a> "
+       , ContentCommand (CommandText "")
+       , ContentText "\n b"
+       ],
+            " a> b")
+    , ([ ContentText "a\n"
+       , ContentCommand (CommandIf (IfCommand [(exprBool True, [ContentText "\n  b\n"])] Nothing))
+       , ContentText "\nc"
+       ],
+            "abc")
+    , ([ ContentText "\n  a\n  "
+       , ContentCommand (CommandIf (IfCommand [(exprBool True, [ContentText " b\n  \n  "])] Nothing))
+       , ContentText "\n  c"
+       ],
+            "a bc")
+    , ([ ContentCommand (CommandIf (IfCommand [(exprBool True, [ContentText "  a\n"])] Nothing))
+       , ContentText "\nb"
+       ],
+            "  ab")
+    , ([ ContentCommand (CommandIf (IfCommand [(exprBool True, [ContentText "  a\n"])] Nothing))
+       , ContentCommand (CommandText " ")
+       , ContentText "\nb"
+       ],
+            "  a b")
     ]
     []
 
