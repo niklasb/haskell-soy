@@ -10,8 +10,6 @@ give back to the open source community. Thanks a lot!
 
 ## Unimplemented features
 
-* Line joining: In the current implementation, whitespace is preserved as is.
-  This will be configurable.
 * custom print directives
 * The `{msg}`, `{css}` and `{del*}` tags
 * Translation and Bidi support
