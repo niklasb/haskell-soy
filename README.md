@@ -10,7 +10,6 @@ give back to the open source community. Thanks a lot!
 
 ## Unimplemented features
 
-* custom print directives
 * The `{msg}`, `{css}` and `{del*}` tags
 * Translation and Bidi support
 * Contextual autoescaping (currently only `autoescape="true/false"` is

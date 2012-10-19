@@ -115,24 +115,10 @@ printCommand excludeTags = uncurry PrintCommand <$> (explicit <|> implicit)
           printExpr = (,) <$> expr <*> (optSpace_ *> directives)
           directives = printDirective `sepBy` optSpace_
 
-printEscapeMode :: Parser EscapeMode
-printEscapeMode = NoEscape <$ string "noAutoescape"
-              <|> EscapeHtml <$ string "escapeHtml"
-              <|> EscapeJs <$ string "escapeJs"
-              <|> EscapeUri <$ string "escapeUri"
-
 printDirective :: Parser PrintDirective
-printDirective = char '|' *> directive
-    where directive = PrintId <$ string "id"
-                  <|> PrintEscape <$> printEscapeMode
-                  <|> PrintChangeNewlineToBr <$ string "changeNewlineToBr"
-                  <|> PrintInsertWordBreaks <$>
-                           (string "insertWordBreaks:" *> optSpace_ *> decimal)
-                  <|> truncateDirective
-          truncateDirective = PrintTruncate
-              <$> (string "truncate:" *> optSpace_ *> decimal)
-              <*> (option True
-                          (False <$ (betweenSpace (char ',') *> string "false")))
+printDirective = PrintDirective
+                  <$> (char '|'  *> identifier)
+                  <*> option [] (char ':' *> optSpace_ *> expr `sepBySpace` (char ','))
 
 foreachCommand :: Parser ForeachCommand
 foreachCommand =
@@ -425,6 +411,7 @@ decodeHexUnsafe :: String -> Integer
 decodeHexUnsafe hex = fromMaybe 0 (headMay $ map fst $ readHex hex)
 
 exprInt = ExprLiteral . litInt
+exprBool = ExprLiteral . LiteralBool
 exprStr = ExprLiteral . LiteralString
 
 litInt = LiteralNumber . I
@@ -803,33 +790,36 @@ test_callCommand = testParser callCommand
         [ "{call .sub.foo}{/call}"
         ]
 
+test_printDirective = testParser printDirective
+        [ ("|noAutoescape", PrintDirective "noAutoescape" [])
+        , ("|truncate: 3+1 , 1 ? true : false",
+                PrintDirective "truncate"
+                  [ ExprOp (OpPlus (exprInt 3) (exprInt 1))
+                  , ExprOp (OpConditional (exprInt 1) (exprBool True) (exprBool False))
+                  ])
+        ]
+        [ "|truncate :1"
+        , "| id"
+        ]
+
 test_printCommand = testParser (printCommand ["nil"])
         [ ("{print 1 }", PrintCommand (exprInt 1) [])
         , ("{ 2 }", PrintCommand (exprInt 2) [])
         , ("{else}", PrintCommand (ExprVar (GlobalVar (Location "else" []))) [])
-        , ("{print 1|noAutoescape |id|escapeHtml|escapeUri|escapeJs }",
+        , ("{print 1|noAutoescape|id}",
               PrintCommand (exprInt 1)
-                [ PrintEscape NoEscape
-                , PrintId
-                , PrintEscape EscapeHtml
-                , PrintEscape EscapeUri
-                , PrintEscape EscapeJs
-                ])
-        , ("{print 1|changeNewlineToBr}",
-              PrintCommand (exprInt 1) [PrintChangeNewlineToBr])
-        , ("{print 1|insertWordBreaks: 10}",
-              PrintCommand (exprInt 1) [PrintInsertWordBreaks 10])
-        , ("{print 1|truncate:10 |truncate: 10 , false }",
+                 [ PrintDirective "noAutoescape" []
+                 , PrintDirective "id" []
+                 ])
+        , ("{print 1 |noAutoescape |id }",
               PrintCommand (exprInt 1)
-                  [ PrintTruncate 10 True
-                  , PrintTruncate 10 False
-                  ])
+                 [ PrintDirective "noAutoescape" []
+                 , PrintDirective "id" []
+                 ])
         ]
         [ "{nil}"
         , "{/param}"
         , "{ print 1}"
-        , "{print 1|truncate :10,false}"
-        , "{print 1| id}"
         ]
 
 test_literalCommand = testParser literalCommand

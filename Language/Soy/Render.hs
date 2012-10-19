@@ -44,6 +44,12 @@ data Function
     = PureFunction ([J.Value] -> Either SoyError J.Value)
     | SpecialFunction ([Expr] -> RenderM J.Value)
 
+data PrintDirectiveImpl
+    = PrintDirectiveImpl
+    { pdir_func :: ([J.Value] -> T.Text -> Either SoyError T.Text)
+    , pdir_stopAutoescape :: Bool
+    }
+
 data Call
     = Call
     { call_file :: File
@@ -64,6 +70,7 @@ data RenderConfig
     , cfg_globals :: HM.HashMap Identifier J.Value
     , cfg_injected :: HM.HashMap Identifier J.Value
     , cfg_functions :: HM.HashMap Identifier Function
+    , cfg_printDirectives :: HM.HashMap Identifier PrintDirectiveImpl
     , cfg_initState :: RenderState
     }
 
@@ -89,7 +96,10 @@ localContext f = local $ first f
 
 defaultRenderState = RenderState (mkStdGen 1337)
 defaultRenderConfig =
-    RenderConfig [] HM.empty HM.empty (HM.fromList builtinFunctions) defaultRenderState
+    RenderConfig [] HM.empty HM.empty
+                 (HM.fromList builtinFunctions)
+                 (HM.fromList builtinPrintDirectives)
+                 defaultRenderState
 
 configure :: (Monad m) => RenderConfig -> StateT RenderConfig m () -> m RenderConfig
 configure s inner = execStateT inner s
@@ -120,10 +130,21 @@ addGlobalData vars = modifyGlobals $ HM.union (HM.fromList vars)
     where modifyGlobals f = modify $ \s -> s { cfg_globals = f (cfg_globals s) }
 
 addFunction :: (MonadState RenderConfig m)
-            => Identifier -> ([J.Value] -> Either SoyError J.Value)
+            => Identifier
+            -> ([J.Value] -> Either SoyError J.Value)
             -> m ()
 addFunction name func = modifyFunctions $ HM.insert name (PureFunction func)
     where modifyFunctions f = modify (\s -> s { cfg_functions = f (cfg_functions s) })
+
+addPrintDirective :: (MonadState RenderConfig m)
+                  => Identifier
+                  -> ([J.Value] -> T.Text -> Either SoyError T.Text)
+                  -> Bool
+                  -> m ()
+addPrintDirective name func stopAutoescape =
+        modifyPrintDirectives $ HM.insert name (PrintDirectiveImpl func stopAutoescape)
+    where modifyPrintDirectives f =
+              modify (\s -> s { cfg_printDirectives = f (cfg_printDirectives s) })
 
 render :: (MonadError SoyError m)
        => [Identifier]
@@ -213,43 +234,34 @@ getDefaultEscaping =
     where fileEsc call = ns_escapeMode $ file_namespace $ call_file $ call
           tmplEsc call = tmpl_escapeMode $ call_template $ call
 
-escape :: T.Text -> EscapeMode -> T.Text
-escape str mode =
+escape :: EscapeMode -> T.Text -> T.Text
+escape mode =
     case mode of
-        NoEscape -> str
-        EscapeUri -> escapeUri str
-        EscapeHtml -> escapeHtml str
-        EscapeJs -> escapeJs str
+        NoEscape -> id
+        EscapeUri -> escapeUri
+        EscapeHtml -> escapeHtml
+        EscapeJs -> escapeJs
 
-insertWordBreaks :: Int -> T.Text -> T.Text
-insertWordBreaks thresh str = T.unwords $ map processWord $ T.words str
-    where processWord w = T.intercalate "<wbr>" $ T.chunksOf thresh w
-
-truncateEllipsis :: Int -> T.Text -> T.Text
-truncateEllipsis size str =
-    if T.length str > size then T.concat [T.take (size - 3) str, "..."]
-                           else str
-
-applyDirective :: T.Text -> PrintDirective -> T.Text
-applyDirective str dir =
-    case dir of
-        PrintEscape mode -> escape str mode
-        PrintId -> str
-        PrintChangeNewlineToBr -> T.replace "\n" "<br />" str
-        PrintInsertWordBreaks threshold -> insertWordBreaks threshold str
-        PrintTruncate size ellipsis ->
-            (if ellipsis then truncateEllipsis else T.take) size str
+applyDirectives :: [PrintDirective] -> T.Text -> RenderM T.Text
+applyDirectives dirs txt =
+    do directivesWithArgs <- lookupDirectives
+       txt' <- foldlM applyDirective txt directivesWithArgs
+       if any pdir_stopAutoescape $ map fst directivesWithArgs
+            then return txt'
+            else flip escape txt' <$> getDefaultEscaping
+    where lookupDirectives =
+            do dirDict <- asksConfig cfg_printDirectives
+               mapM (lookupDirective dirDict) dirs
+          lookupDirective dirDict (PrintDirective name args) =
+            do evaluatedArgs <- mapM evalExprDefined args
+               maybe (err name) (return . (,evaluatedArgs)) $ HM.lookup name dirDict
+          err name = throwError $ PrintDirectiveLookupError
+                                $ T.append "Print directive not found: " name
+          applyDirective txt (PrintDirectiveImpl f _, args) =
+              either throwError return $ f args txt
 
 renderPrintCommand :: PrintCommand -> RenderM T.Text
-renderPrintCommand (PrintCommand exp directives) =
-    do str <- valToString <$> evalExprDefined exp
-       let str' = foldl applyDirective str directives
-       if any stopDefaultEscape directives
-            then return str'
-            else escape str' <$> getDefaultEscaping
-    where stopDefaultEscape (PrintEscape _) = True
-          stopDefaultEscape PrintId = True
-          stopDefaultEscape _ = False
+renderPrintCommand (PrintCommand exp dirs) = evalStr exp >>= applyDirectives dirs
 
 evalCases :: Maybe [Content] -> [(RenderM Bool, [Content])] -> RenderM T.Text
 evalCases fallback cases =
@@ -379,9 +391,10 @@ evalFuncCall (FuncCall name args) =
     do evaluatedArgs <- mapM evalExprDefined args
        functions <- asksConfig cfg_functions
        case HM.lookup name functions of
-         Just (PureFunction f) -> either throwError return $ f evaluatedArgs
-         Just (SpecialFunction f) -> f args
-         Nothing -> throwError $ LookupError $ T.append "Function not found: " name
+           Just (PureFunction f) -> either throwError return $ f evaluatedArgs
+           Just (SpecialFunction f) -> f args
+           Nothing -> throwError $ FunctionLookupError
+                                 $ T.append "Function not found: " name
 
 evalOp :: OpExpr -> RenderM (Maybe J.Value)
 evalOp op =
@@ -572,6 +585,60 @@ func_isLast [ExprVar (LocalVar (Location var []))] =
     where isLast (i, size) = i + 1 == size
 func_isLast _ = funcError "isLast($<foreach variable>)"
 
+builtinPrintDirectives =
+    [ ("noAutoescape", PrintDirectiveImpl pdir_noAutoescape True)
+    , ("id", PrintDirectiveImpl pdir_noAutoescape True)
+    , ("escapeUri", PrintDirectiveImpl pdir_escapeUri True)
+    , ("escapeJs", PrintDirectiveImpl pdir_escapeJs True)
+    , ("escapeHtml", PrintDirectiveImpl pdir_escapeHtml True)
+    , ("insertWordBreaks", PrintDirectiveImpl pdir_insertWordBreaks False)
+    , ("changeNewlineToBr", PrintDirectiveImpl pdir_changeNewlineToBr False)
+    , ("truncate", PrintDirectiveImpl pdir_truncate False)
+    ]
+
+pdirError :: (MonadError SoyError m) => T.Text -> m a
+pdirError p = typeError $
+    T.append "Wrong argument count or type mismatch in usage of print directive " p
+
+pdir_noAutoescape :: [J.Value] -> T.Text -> Either SoyError T.Text
+pdir_noAutoescape [] = Right
+pdir_noAutoescape _ = const $ pdirError "noAutoescape"
+
+pdir_escapeUri :: [J.Value] -> T.Text -> Either SoyError T.Text
+pdir_escapeUri [] = Right . escapeUri
+pdir_escapeUri _ = const $ pdirError "escapeUri"
+
+pdir_escapeJs :: [J.Value] -> T.Text -> Either SoyError T.Text
+pdir_escapeJs [] = Right . escapeJs
+pdir_escapeJs _ = const $ pdirError "escapeJs"
+
+pdir_escapeHtml :: [J.Value] -> T.Text -> Either SoyError T.Text
+pdir_escapeHtml [] = Right . escapeHtml
+pdir_escapeHtml _ = const $ pdirError "escapeHtml"
+
+insertWordBreaks :: Int -> T.Text -> T.Text
+insertWordBreaks thresh str = T.unwords $ map processWord $ T.words str
+    where processWord w = T.intercalate "<wbr>" $ T.chunksOf thresh w
+
+pdir_insertWordBreaks :: [J.Value] -> T.Text -> Either SoyError T.Text
+pdir_insertWordBreaks [(J.Number (J.I thresh))] =
+    Right . insertWordBreaks (fromInteger thresh)
+pdir_insertWordBreaks _ = const $ pdirError "insertWordBreaks:<int>"
+
+pdir_changeNewlineToBr :: [J.Value] -> T.Text -> Either SoyError T.Text
+pdir_changeNewlineToBr [] = Right . T.replace "\n" "<br />"
+pdir_changeNewlineToBr _ = const $ pdirError "changeNewlineToBr"
+
+truncateEllipsis :: Int -> T.Text -> T.Text
+truncateEllipsis size str =
+    if T.length str > size then T.concat [T.take (size - 3) str, "..."]
+                           else str
+pdir_truncate :: [J.Value] -> T.Text -> Either SoyError T.Text
+pdir_truncate [(J.Number (J.I size))] = Right . T.take (fromInteger size)
+pdir_truncate [(J.Number (J.I size)), (J.Bool ellipsis)] =
+    Right . (if ellipsis then truncateEllipsis else T.take) (fromInteger size)
+pdir_truncate _ = const $ pdirError "truncate:<int>[,<bool>]"
+
 -- helpers
 
 switch :: a -> a -> Bool -> a
@@ -591,6 +658,12 @@ anyM (x:xs) = x >>= switch (return True) (anyM xs)
 findM :: (Monad m) => (a -> m Bool) -> [a] -> m (Maybe a)
 findM f (x:xs) = f x >>= (\b -> if b then return $ Just x else findM f xs)
 findM f [] = return Nothing
+
+foldlM :: (Monad m) => (a -> b -> m a) -> a -> [b] -> m a
+foldlM _ acc [] = return acc
+foldlM f acc (x:xs) =
+    do acc' <- f acc x
+       foldlM f acc' xs
 
 -- apply a transformation to the tail of the list and another one to the head of the
 -- list in a single iteration
@@ -750,14 +823,29 @@ test_renderPrintCommand = testRenderM
         testContext { ctx_currentCall = Call ns_sub print_sub2 HM.empty }
         renderPrintCommand
     [ (printStr "&'\"<>" [], "&#x26;&#x27;&#x22;&#x3C;&#x3E;")
-    , (printStr "&\"'foo\xff\x1234" [PrintEscape EscapeJs], "&\\x22\\x27foo\\xFF\\u1234")
-    , (printStr "\"&" [PrintId], "\"&")
-    , (printStr "foobar" [PrintTruncate 3 False], "foo")
-    , (printStr "&&&" [PrintTruncate 6 True, PrintEscape EscapeHtml], "&#x26;&#x26;&#x26;")
-    , (printStr "&&&" [PrintEscape EscapeHtml, PrintTruncate 6 True], "&#x...")
-    , (printStr "a\na" [PrintEscape EscapeHtml, PrintChangeNewlineToBr], "a<br />a")
-    , (printStr "fooba fooba" [PrintInsertWordBreaks 2, PrintEscape NoEscape],
-                      "fo<wbr>ob<wbr>a fo<wbr>ob<wbr>a")
+    , (printStr "&\"'foo\xff\x1234" [PrintDirective "escapeJs" []], "&\\x22\\x27foo\\xFF\\u1234")
+    , (printStr "\"&" [PrintDirective "id" []], "\"&")
+    , (printStr "foobar" [PrintDirective "truncate" [exprInt 3]], "foo")
+    , (printStr "&&&"
+            [ PrintDirective "truncate" [exprInt 6, exprBool True]
+            , PrintDirective "escapeHtml" []
+            ],
+        "&#x26;&#x26;&#x26;")
+    , (printStr "&&&"
+            [ PrintDirective "escapeHtml" []
+            , PrintDirective "truncate" [exprInt 6, exprBool True]
+            ],
+        "&#x...")
+    , (printStr "a\na"
+            [ PrintDirective "escapeHtml" []
+            , PrintDirective "changeNewlineToBr" []
+            ],
+        "a<br />a")
+    , (printStr "fooba fooba"
+            [ PrintDirective "insertWordBreaks" [exprInt 2]
+            , PrintDirective "noAutoescape" []
+            ],
+        "fo<wbr>ob<wbr>a fo<wbr>ob<wbr>a")
     ]
     []
     where printStr str dir = PrintCommand (exprStr str) dir

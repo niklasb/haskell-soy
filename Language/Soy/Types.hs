@@ -59,11 +59,10 @@ data Command
     deriving (Eq, Ord, Show)
 
 data PrintDirective
-    = PrintEscape EscapeMode
-    | PrintId
-    | PrintChangeNewlineToBr
-    | PrintInsertWordBreaks Int
-    | PrintTruncate Int Bool
+    = PrintDirective
+    { pdir_name :: Identifier
+    , pdir_args :: [Expr]
+    }
     deriving (Eq, Ord, Show)
 
 data PrintCommand
@@ -179,6 +178,8 @@ data SoyError
     | TypeError T.Text
     | KeyError T.Text
     | TemplateLookupError T.Text
+    | FunctionLookupError T.Text
+    | PrintDirectiveLookupError T.Text
     | GeneralError T.Text
     | NotImplementedError T.Text
     deriving (Eq, Show)
