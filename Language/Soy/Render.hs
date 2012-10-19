@@ -218,12 +218,16 @@ renderCommand :: Command -> RenderM T.Text
 renderCommand cmd =
     case cmd of
         CommandText t -> return t
-        CommandPrint p -> renderPrintCommand p
+        CommandPrint c -> renderPrintCommand c
         CommandIf c -> renderIfCommand c
         CommandForeach c -> renderForeachCommand c
         CommandFor c -> renderForCommand c
+        CommandMsg c -> renderMsgCommand c
         CommandCall c -> renderCallCommand c
         CommandSwitch c -> renderSwitchCommand c
+
+renderMsgCommand :: MsgCommand -> RenderM T.Text
+renderMsgCommand = renderContents . msg_content
 
 defaultEscapeMode = EscapeHtml
 

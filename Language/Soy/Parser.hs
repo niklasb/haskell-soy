@@ -18,9 +18,17 @@ import Control.Applicative
 import Control.Monad
 import Data.Char (isSpace)
 import Safe
+import Data.List
 import Data.Maybe
 import Data.Monoid
 import Numeric (readHex)
+
+data Attribute a
+    = Attribute
+    { attr_name :: T.Text
+    , attr_parser :: Parser a
+    , attr_required :: Bool
+    }
 
 parseSoyFile :: Monad m => T.Text -> m File
 parseSoyFile txt = either fail return $ parseOnly file txt
@@ -38,8 +46,8 @@ simpleEscapeMode = NoEscape <$ string "false"
 namespace :: Parser Namespace
 namespace = openTag "namespace" header
     where header = Namespace <$> fullPath <*> escapeMode
-          escapeMode = headMay <$> attributes attr
-          attr = [ ("autoescape", simpleEscapeMode) ]
+          escapeMode = headMay <$> attributesSpace attr
+          attr = [ Attribute "autoescape" simpleEscapeMode False ]
 
 openTag :: T.Text -> Parser a -> Parser a
 openTag name body = between (string "{{") (string "}}") inner
@@ -60,9 +68,9 @@ template =
        closeTag_ "template"
        return $ base { tmpl_content = inner }
     where header = do name <- (char '.' *> identifier)
-                      modifier <- liftM (appEndo . mconcat) $ attributes
-                          [ ("autoescape", setEscapeMode <$> simpleEscapeMode)
-                          , ("private", setPrivate <$> bool)
+                      modifier <- liftM (appEndo . mconcat) $ attributesSpace
+                          [ Attribute "autoescape" (setEscapeMode <$> simpleEscapeMode) False
+                          , Attribute "private" (setPrivate <$> bool) False
                           ]
                       return $ modifier $ Template name [] False Nothing
           setEscapeMode e = Endo $ \n -> n { tmpl_escapeMode = Just e }
@@ -91,11 +99,13 @@ command excludeTags = CommandText "" <$ string "{nil}"
       <|> CommandText "{" <$ string "{lb}"
       <|> CommandText "}" <$ string "{rb}"
       <|> CommandText <$> literalCommand
+      <|> CommandMsg <$> msgCommand
       <|> CommandForeach <$> foreachCommand
       <|> CommandFor <$> forCommand
       <|> CommandIf <$> ifCommand
       <|> CommandSwitch <$> switchCommand
       <|> CommandCall <$> callCommand
+      -- this one must be the last try because it can be called without the tag name
       <|> CommandPrint <$> printCommand excludeTags
 
 literalCommand :: Parser T.Text
@@ -106,6 +116,20 @@ exclude :: [Parser a] -> Parser b -> Parser b
 exclude excl p = inner >>= maybe (fail "") return
     where inner = Nothing <$ choice excl
               <|> Just <$> p
+
+msgCommand :: Parser MsgCommand
+msgCommand =
+    do base <- openTag "msg" header
+       inner <- contents []
+       closeTag_ "msg"
+       return $ base { msg_content = inner }
+    where header = do modifier <- liftM (appEndo . mconcat) $ attributes
+                          [ Attribute "desc" (setDesc <$> takeText) True
+                          , Attribute "meaning" (setMeaning <$> takeText) False
+                          ]
+                      return $ modifier $ MsgCommand "" Nothing []
+          setDesc d = Endo $ \n -> n { msg_desc = d }
+          setMeaning m = Endo $ \n -> n { msg_meaning = Just m }
 
 printCommand :: [T.Text] -> Parser PrintCommand
 printCommand excludeTags = uncurry PrintCommand <$> (explicit <|> implicit)
@@ -173,8 +197,8 @@ callCommand = inlineCallCommand <|> parameterizedCallCommand
 callHeader :: Parser (TemplatePath, Maybe CallData)
 callHeader = (,) <$> templatePath <*> attributeList
     where attributeList =
-              (maybe Nothing Just . headMay) <$> attributes validAttr
-          validAttr = [ ("data", dataValue) ]
+              (maybe Nothing Just . headMay) <$> attributesSpace validAttr
+          validAttr = [ Attribute "data" dataValue False ]
           dataValue = CallDataAll <$ string "all"
                   <|> CallDataExpr <$> expr
 
@@ -307,15 +331,27 @@ findDup :: (Eq a) => [a] -> Maybe a
 findDup (x:xs) = if x `elem` xs then Just x else findDup xs
 findDup [] = Nothing
 
-attributes :: [(T.Text, Parser a)] -> Parser [a]
-attributes lst = fromMaybe [] <$> optional (space_ *> attrLst)
-    where attrLst = do pairs <- (choice choices) `sepBy` space_
-                       case findDup $ map fst pairs of
-                          Just key -> fail $ "duplicate attribute: " ++ T.unpack key
-                          _ -> return ()
-                       return $ map snd pairs
-          choices = map attr lst
-          attr (k,p) = (k,) <$> (string k *> char '=' *> quoted '"' p)
+attributesSpace = attributesBefore space_
+attributes = attributesBefore nothing
+
+attributesBefore :: Parser b -> [Attribute a] -> Parser [a]
+attributesBefore before lst = option [] (before *> attrLst) >>= check
+    where attrLst = (kv `sepBy` space_) >>= mapM findAttr
+          kv = (,) <$> identifier <*> (char '=' *> quotedString '"')
+          findAttr (key, value) =
+             case find ((== key) . attr_name) lst of
+                Just (Attribute name p _) -> (name,) <$> delegate p value
+                _ -> fail $ "unexpected attribute: " ++ T.unpack key
+          requiredAttrs = filter attr_required lst
+          check attrsWithValues =
+             do let (attrs, values) = unzip attrsWithValues
+                case findDup attrs of
+                   Just a -> fail $ "duplicate attribute: " ++ T.unpack a
+                   _ -> return ()
+                case find (not . (`elem` attrs)) $ map attr_name requiredAttrs of
+                   Just a -> fail $ "required attribute missing: " ++ T.unpack a
+                   _ -> return ()
+                return values
 
 keyValuePair :: T.Text -> Parser a -> Parser b -> Parser (a, b)
 keyValuePair sep k v = (,) <$> k <*> (betweenSpace (string sep) *> v)
@@ -530,17 +566,18 @@ test_quotedString = testParser (quotedString '"')
         [ "'"
         ]
 
-test_attributes = testParser (attributes [ ("foo", char 'a')
-                                         , ("bar", char 'b')])
-        [ (" foo=\"a\" bar=\"b\"", "ab")
-        , (" bar=\"b\" foo=\"a\"", "ba")
-        , (" bar=\"b\"", "b")
-        , (" ", "")
+test_attributes = testParser (attributes [ Attribute "foo" (char 'a') False
+                                         , Attribute "bar" (char 'b') True
+                                         ])
+        [ ("foo=\"a\" bar=\"b\"", "ab")
+        , ("bar=\"b\" foo=\"a\"", "ba")
+        , ("bar=\"b\"", "b")
         ]
-        [ " bar=\"b\" bar=\"a\""
+        [ "bar=\"b\" bar=\"a\""
         , "bar =\"b\""
-        , "bar= \"b\""
-        , "bar=\"b\""
+        , " bar= \"b\""
+        , "foo=\"a\""
+        , ""
         ]
 
 test_identifier = testParserNoOut identifier
@@ -669,6 +706,15 @@ test_contents = testParser (contents [])
                 ])
         ]
         []
+
+test_msgCommand = testParser msgCommand
+        [ ("{msg desc=\"foo\" }bar{/msg}",
+                MsgCommand "foo" Nothing [ContentText "bar"])
+        , ("{msg desc=\"foo\" meaning=\"baz\"}bar{/msg}",
+                MsgCommand "foo" (Just "baz") [ContentText "bar"])
+        ]
+        [ "{msg meaning=\"baz\"}bar{/msg}"
+        ]
 
 test_foreachCommand = testParser foreachCommand
         [ (joinT [ "{foreach $test in $data + 5}"

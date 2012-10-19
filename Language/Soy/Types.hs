@@ -50,6 +50,7 @@ data TemplatePath
 
 data Command
     = CommandText T.Text
+    | CommandMsg MsgCommand
     | CommandPrint PrintCommand
     | CommandIf IfCommand
     | CommandSwitch SwitchCommand
@@ -57,6 +58,13 @@ data Command
     | CommandFor ForCommand
     | CommandCall CallCommand
     deriving (Eq, Ord, Show)
+
+data MsgCommand
+    = MsgCommand
+    { msg_desc :: T.Text
+    , msg_meaning :: Maybe T.Text
+    , msg_content :: [Content]
+    } deriving (Eq, Ord, Show)
 
 data PrintDirective
     = PrintDirective
