@@ -18,7 +18,7 @@ import Control.Applicative
 import Control.Monad
 import Data.Char (isSpace)
 import Safe
-import Data.List
+import Data.List hiding (takeWhile)
 import Data.Maybe
 import Data.Monoid
 import Numeric (readHex)
@@ -58,14 +58,15 @@ openCloseTag :: T.Text -> Parser a -> Parser a
 openCloseTag name body = between (char '{') (string "/}")
                                  (name .*> space_ *> body <* optSpace_)
 
-closeTag_ :: T.Text -> Parser ()
-closeTag_ name = () <$ between (string "{/") (char '}') (string name)
+closeTag :: T.Text -> Parser T.Text
+closeTag name = string "{/" *> string name *> string "}"
+            <|> string "{{/" *> string name *> string "}}"
 
 template :: Parser Template
 template =
     do base <- openTag "template" header
        inner <- contents []
-       closeTag_ "template"
+       closeTag "template"
        return $ base { tmpl_content = inner }
     where header = do name <- (char '.' *> identifier)
                       modifier <- liftM (appEndo . mconcat) $ attributesSpace
@@ -99,6 +100,7 @@ command excludeTags = CommandText "" <$ string "{nil}"
       <|> CommandText "{" <$ string "{lb}"
       <|> CommandText "}" <$ string "{rb}"
       <|> CommandText <$> literalCommand
+      <|> CommandCss <$> cssCommand
       <|> CommandMsg <$> msgCommand
       <|> CommandForeach <$> foreachCommand
       <|> CommandFor <$> forCommand
@@ -109,8 +111,10 @@ command excludeTags = CommandText "" <$ string "{nil}"
       <|> CommandPrint <$> printCommand excludeTags
 
 literalCommand :: Parser T.Text
-literalCommand = "{literal}" .*>
-                     (T.pack <$> manyTill anyChar (string "{/literal}"))
+literalCommand = "{literal}" .*> (T.pack <$> manyTill anyChar (string "{/literal}"))
+
+cssCommand :: Parser CssCommand
+cssCommand = CssCommand <$> openTag "css" (T.stripEnd <$> takeWhile (/='}'))
 
 exclude :: [Parser a] -> Parser b -> Parser b
 exclude excl p = inner >>= maybe (fail "") return
@@ -121,7 +125,7 @@ msgCommand :: Parser MsgCommand
 msgCommand =
     do base <- openTag "msg" header
        inner <- contents []
-       closeTag_ "msg"
+       closeTag "msg"
        return $ base { msg_content = inner }
     where header = do modifier <- liftM (appEndo . mconcat) $ attributes
                           [ Attribute "desc" (setDesc <$> takeText) True
@@ -149,7 +153,7 @@ foreachCommand =
     do (iter, coll) <- openTag "foreach" commandLine
        body <- contents ["ifempty"]
        ifempty <- option Nothing (Just <$> ("{ifempty}" .*> contents []))
-       closeTag_ "foreach"
+       closeTag "foreach"
        return $ ForeachCommand iter coll body ifempty
     where commandLine = (,) <$> (char '$' *> identifier)
                             <*> (betweenSpace1 (string "in") *> expr)
@@ -158,7 +162,7 @@ forCommand :: Parser ForCommand
 forCommand =
     do (iter, from, to, step) <- openTag "for" header
        body <- contents []
-       closeTag_ "for"
+       closeTag "for"
        return $ ForCommand iter from to step body
     where header = do iter <- (char '$' *> identifier)
                       betweenSpace1 (string "in")
@@ -175,7 +179,7 @@ forCommand =
 
 ifCommand :: Parser IfCommand
 ifCommand = IfCommand <$> branches <*> optional ("{else}" .*> restrContents)
-                      <* closeTag_ "if"
+                      <* closeTag "if"
     where branches = (:) <$> branch "if" <*> many (branch "elseif")
           branch tag = (,) <$> openTag tag expr <*> restrContents
           restrContents = contents ["else", "elseif"]
@@ -184,7 +188,7 @@ switchCommand :: Parser SwitchCommand
 switchCommand = SwitchCommand <$> openTag "switch" expr
                               <*> (optSpaceAndComments_ *> many exprCase)
                               <*> optional defaultCase
-                              <*  closeTag_ "switch"
+                              <*  closeTag "switch"
     where exprCase = (,) <$> openTag "case" exprList
                          <*> restrContents
           defaultCase = "{default}" .*> restrContents
@@ -211,7 +215,7 @@ parameterizedCallCommand :: Parser CallCommand
 parameterizedCallCommand =
     do (target, calldat) <- openTag "call" callHeader
        params <- many (optSpaceAndComments_ *> callParam) <* optSpaceAndComments_
-       closeTag_ "call"
+       closeTag "call"
        return $ CallCommand target calldat params
 
 callParam :: Parser (Identifier, CallParam)
@@ -221,7 +225,7 @@ callParam = inlineParam <|> templateParam
           header = (,) <$> identifier
                        <*> (betweenSpace (char ':') *> paramExpr)
           templateParam = (,) <$> openTag "param" identifier
-                              <*> (paramTempl <* closeTag_ "param")
+                              <*> (paramTempl <* closeTag "param")
           paramTempl = ParamTemplate <$> contents ["param"]
 
 opSymbol s = betweenSpace (string s)

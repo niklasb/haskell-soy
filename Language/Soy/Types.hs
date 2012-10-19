@@ -50,6 +50,7 @@ data TemplatePath
 
 data Command
     = CommandText T.Text
+    | CommandCss CssCommand
     | CommandMsg MsgCommand
     | CommandPrint PrintCommand
     | CommandIf IfCommand
@@ -64,6 +65,11 @@ data MsgCommand
     { msg_desc :: T.Text
     , msg_meaning :: Maybe T.Text
     , msg_content :: [Content]
+    } deriving (Eq, Ord, Show)
+
+data CssCommand
+    = CssCommand
+    { css_text :: T.Text
     } deriving (Eq, Ord, Show)
 
 data PrintDirective

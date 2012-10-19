@@ -198,18 +198,22 @@ renderTemplate vars file template =
     do withTemplate file template vars $ renderContents (tmpl_content template)
 
 -- implement the line joining heuristics
-stripContent :: T.Text -> T.Text
-stripContent txt = T.concat segments
+stripContentGen :: (T.Text -> T.Text -> T.Text) -> T.Text -> T.Text
+stripContentGen sep txt = T.concat segments
     where lines' = mapTailInit T.stripStart T.stripEnd $ T.splitOn "\n" txt
           lines'' = filter (not . T.null) lines'
-          sep a b = if T.last a == '>' || T.head b == '<' then "" else " "
           segments
             | null lines'' = []
             | otherwise = head lines'' : [ T.append (sep a b) b
                                           | (a, b) <- zip lines'' (tail lines'') ]
 
+stripContentSmart = stripContentGen sep
+    where sep a b = if T.last a == '>' || T.head b == '<' then "" else " "
+
+stripContentDumb = stripContentGen (\_ _ -> " ")
+
 renderContent :: Content -> RenderM T.Text
-renderContent (ContentText t) = return $ stripContent t
+renderContent (ContentText t) = return $ stripContentSmart t
 renderContent (ContentCommand c) = renderCommand c
 
 renderContents conts = T.concat <$> mapM renderContent conts
@@ -223,11 +227,15 @@ renderCommand cmd =
         CommandForeach c -> renderForeachCommand c
         CommandFor c -> renderForCommand c
         CommandMsg c -> renderMsgCommand c
+        CommandCss c -> renderCssCommand c
         CommandCall c -> renderCallCommand c
         CommandSwitch c -> renderSwitchCommand c
 
 renderMsgCommand :: MsgCommand -> RenderM T.Text
 renderMsgCommand = renderContents . msg_content
+
+renderCssCommand :: CssCommand -> RenderM T.Text
+renderCssCommand (CssCommand txt) = return $ stripContentDumb txt
 
 defaultEscapeMode = EscapeHtml
 
@@ -746,13 +754,13 @@ testContext = RenderContext
     , ctx_localStack = []
     }
 
-test_stripContent =
-    do assertEqual " a>b c \t<d<e " (stripContent " a> \n \n b \n c \t<d \n <e ")
-       assertEqual " a b "          (stripContent " a \n b ")
-       assertEqual " a "            (stripContent " a ")
-       assertEqual "a "             (stripContent "\n a ")
-       assertEqual "  "             (stripContent "  ")
-       assertEqual ""               (stripContent "")
+test_stripContentSmart =
+    do assertEqual " a>b c \t<d<e " (stripContentSmart " a> \n \n b \n c \t<d \n <e ")
+       assertEqual " a b "          (stripContentSmart " a \n b ")
+       assertEqual " a "            (stripContentSmart " a ")
+       assertEqual "a "             (stripContentSmart "\n a ")
+       assertEqual "  "             (stripContentSmart "  ")
+       assertEqual ""               (stripContentSmart "")
 
 test_renderContents = testRenderM testConfig testContext renderContents
     [ ([ContentText "\n a ", ContentCommand (CommandText ""), ContentText " b \n"],
@@ -821,6 +829,10 @@ test_getDefaultEscaping =
             runRenderM testConfig
                        testContext { ctx_currentCall = Call ns_sub tmpl HM.empty }
                        getDefaultEscaping
+
+test_renderCssCommand = testRenderM testConfig testContext renderCssCommand
+    [ (CssCommand "a  a \n  \n  \n b  b", "a  a b  b") ]
+    []
 
 test_renderPrintCommand = testRenderM
         testConfig
