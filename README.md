@@ -10,8 +10,9 @@ give back to the open source community. Thanks a lot!
 
 ## Unimplemented features
 
-* The `{msg}`, `{css}` and `{del*}` tags
-* Translation and Bidi support
+* The `{del*}` tags
+* The `{css}` tag (currently the inner text is simply echoed)
+* Translation and Bidi support (currently `{msg}` just echoes the contained text)
 * Contextual autoescaping (currently only `autoescape="true/false"` is
   implemented)
 * Soy Doc (will probably never be implemented)
