@@ -701,8 +701,6 @@ undefinedExpr = ExprVar (LocalVar (Location "notexisting" []))
 
 printVar t var = CommandPrint (PrintCommand (ExprVar (t (Location var []))) [])
 
-tests = htfMain htf_Language_Soy_Render_thisModulesTests
-
 testOk a b = assertEqual (Right b) a
 testGen prep inout errin = mapM_ (\(x,y) -> testOk (prep x) y) inout
                         >> mapM_ (\x -> assertLeft (prep x)) errin

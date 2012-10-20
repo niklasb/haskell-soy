@@ -463,8 +463,6 @@ litFloat = LiteralNumber . D
 
 joinT = T.init . T.unlines
 
-tests = htfMain htf_Language_Soy_Parser_thisModulesTests
-
 testParser p inout errin =
     do mapM_ (\(inp, exp) -> assertEqual (Right exp) (parseAll inp)) inout
        mapM_ (assertLeft . parseAll) errin
