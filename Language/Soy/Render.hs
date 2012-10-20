@@ -257,7 +257,7 @@ escape mode =
 applyDirectives :: [PrintDirective] -> T.Text -> RenderM T.Text
 applyDirectives dirs txt =
     do directivesWithArgs <- lookupDirectives
-       txt' <- foldlM applyDirective txt directivesWithArgs
+       txt' <- foldM applyDirective txt directivesWithArgs
        if any pdir_stopAutoescape $ map fst directivesWithArgs
             then return txt'
             else flip escape txt' <$> getDefaultEscaping
@@ -670,12 +670,6 @@ anyM (x:xs) = x >>= switch (return True) (anyM xs)
 findM :: (Monad m) => (a -> m Bool) -> [a] -> m (Maybe a)
 findM f (x:xs) = f x >>= (\b -> if b then return $ Just x else findM f xs)
 findM f [] = return Nothing
-
-foldlM :: (Monad m) => (a -> b -> m a) -> a -> [b] -> m a
-foldlM _ acc [] = return acc
-foldlM f acc (x:xs) =
-    do acc' <- f acc x
-       foldlM f acc' xs
 
 -- apply a transformation to the tail of the list and another one to the head of the
 -- list in a single iteration
