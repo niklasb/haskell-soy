@@ -1,0 +1,31 @@
+Name:                haskell-soy
+Version:             0.1
+Synopsis:            Google Closure Templates for Haskell
+Description:         This project is an attempt to bring the Closure Templates to the Haskell platform. It provides a parser and a renderer and doesn't depend on the Google libraries.
+License:             BSD3
+License-File:        LICENSE
+Author:              Niklas Baumstark
+Maintainer:          Alexander Thiemann <thiemann@factisresearch.com>
+Build-Type:          Simple
+Cabal-Version:       >=1.6
+Category:            Language, Interpreters, Text
+Homepage:               https://github.com/niklasb/haskell-soy
+Bug-reports:            https://github.com/niklasb/haskell-soy/issues
+
+Library
+   Build-Depends:     base >= 3 && < 5,
+                      random == 1.0.*,
+                      text == 0.11.*,
+                      vector == 0.10.*,
+                      mtl >= 2.0.0,
+                      HTF >= 0.10.0.7,
+                      safe >= 0.3.3,
+                      unordered-containers == 0.2.3.*,
+                      attoparsec == 0.10.*,
+                      aeson == 0.6.*,
+                      bytestring == 0.10.*
+   Exposed-modules:   Language.Soy
+
+Source-repository head
+   Type:                 git
+   Location:             git://github.com/niklasb/haskell-soy.git
