@@ -7,7 +7,7 @@ module Language.Soy.Parser
     ) where
 
 import Language.Soy.Types
-import qualified Data.Attoparsec.Expr as E
+import qualified Language.Soy.Expr as E
 
 import Data.Attoparsec.Text
 import Test.Framework
